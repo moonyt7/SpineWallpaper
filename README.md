@@ -65,3 +65,5 @@ SpineWallpaper/
 │                   └── spine_wallpaper_info.xml
 └── build.gradle.kts
 ```
+<img width="1280" height="2772" alt="8c8d52541dbc400b5eba8b097b72732" src="https://github.com/user-attachments/assets/b0d05222-d755-40fa-a5d7-bff0a6d4b28c" />
+<img width="1280" height="2772" alt="ae91baa0c8c9b5b199c5ab2a1a59404" src="https://github.com/user-attachments/assets/7ef1d8de-d919-4b49-96b7-be28062bd560" />
