@@ -1,5 +1,5 @@
 # SpineWallpaper - Android Spine 2D Live Wallpaper Application
-
+本项目完全由AI生成
 SpineWallpaper is a full-featured Android Live Wallpaper application built with **Kotlin**, **Jetpack Compose**, and the official **spine-android** runtime library.
 
 ---
