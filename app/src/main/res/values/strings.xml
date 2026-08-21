@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Spine 动态壁纸</string>
+    <string name="wallpaper_title">Spine 2D 动态壁纸</string>
+    <string name="wallpaper_description">基于 Spine 官方 Android 渲染引擎打造的高性能 2D 动态壁纸</string>
+</resources>
