@@ -153,41 +153,11 @@ object SpineVersionAdapter {
         if (isBinary) {
             try {
                 val bytes = file.readBytes()
-                if (bytes.size > 12) {
-                    // 1. Try Spine 3.8+ (8 bytes hash + version string)
-                    try {
-                        val r38 = BinaryStreamReader38(ByteArrayInputStream(bytes))
-                        r38.readLong()
-                        val v38 = r38.readString()
-                        if (v38 != null && v38.length in 3..14) {
-                            for (ver in listOf("4.2", "4.1", "4.0", "3.8")) {
-                                if (v38.startsWith(ver)) return ver
-                            }
-                        }
-                    } catch (_: Exception) {}
-
-                    // 2. Try Spine 3.6/3.7 (string hash + version string)
-                    try {
-                        val r37 = BinaryStreamReader38(ByteArrayInputStream(bytes))
-                        r37.readString() // string hash
-                        val v37 = r37.readString()
-                        if (v37 != null && v37.length in 3..14) {
-                            for (ver in listOf("3.7", "3.6", "3.5", "3.4")) {
-                                if (v37.startsWith(ver)) return ver
-                            }
-                        }
-                    } catch (_: Exception) {}
-                }
-
-                // 3. Fallback scan in first 512 bytes
-                val head = String(bytes, 0, minOf(bytes.size, 512), StandardCharsets.ISO_8859_1)
-                for (ver in listOf("4.2", "4.1", "4.0", "3.8", "3.7", "3.6", "3.5")) {
-                    if (head.contains(ver)) return ver
-                }
+                return detectVersionFromBinary(bytes)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-            return "3.8"
+            return "4.1"
         } else {
             try {
                 val headerSample = file.bufferedReader().use { r ->
@@ -205,6 +175,51 @@ object SpineVersionAdapter {
             }
             return "4.1"
         }
+    }
+
+    /**
+     * Robustly detects a Spine version from a binary .skel buffer.
+     * 3.6/3.7/3.8 begin with a varint-length-prefixed String hash; 4.x begins with a raw 8-byte long hash.
+     */
+    private fun detectVersionFromBinary(bytes: ByteArray): String {
+        // Try String-hash layout (3.6 / 3.7 / 3.8, and also catches 4.x when the layout is ambiguous).
+        try {
+            val r = BinaryStreamReader38(ByteArrayInputStream(bytes))
+            val len = r.readVarint(true)
+            when (len) {
+                0, 1 -> r.readString() // null or empty hash
+                in 2..256 -> {
+                    val raw = r.readRawBytes(len - 1)
+                    if (!raw.all { it in 32..126 }) throw IOException("not a string hash")
+                }
+                else -> throw IOException("unlikely string length")
+            }
+            val v = r.readString()
+            if (v != null) {
+                for (ver in listOf("3.8", "3.7", "3.6", "4.2", "4.1", "4.0")) {
+                    if (v.startsWith(ver)) return ver
+                }
+            }
+        } catch (_: Exception) {}
+
+        // Try long-hash layout (4.0 / 4.1 / 4.2).
+        try {
+            val r2 = BinaryStreamReader38(ByteArrayInputStream(bytes))
+            r2.readLong()
+            val v = r2.readString()
+            if (v != null) {
+                for (ver in listOf("4.2", "4.1", "4.0")) {
+                    if (v.startsWith(ver)) return ver
+                }
+            }
+        } catch (_: Exception) {}
+
+        // Last resort: scan the first 512 bytes for a version marker.
+        val head = String(bytes, 0, minOf(bytes.size, 512), StandardCharsets.ISO_8859_1)
+        for (ver in listOf("4.2", "4.1", "4.0", "3.8", "3.7", "3.6", "3.5")) {
+            if (head.contains(ver)) return ver
+        }
+        return "4.1"
     }
 
     fun detectFormat(file: File): String {

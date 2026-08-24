@@ -16,6 +16,7 @@ import java.io.ByteArrayInputStream
 import java.io.EOFException
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -380,11 +381,13 @@ class MeshAttachment38(name: String) : Attachment38(name) {
             val bY = slot.bone.worldY
 
             val targetEnd = offset + (count / 2) * stride
+            val hasDeform = deform.size > 0
             while (w < targetEnd && v + 1 < vertices.size && w + 1 < worldVertices.size) {
-                val dfx = if (v < deform.size) deform[v] else 0f
-                val dfy = if (v + 1 < deform.size) deform[v + 1] else 0f
-                val vx = vertices[v] + dfx
-                val vy = vertices[v + 1] + dfy
+                // Spine 3.x non-weighted deform is ABSOLUTE vertex positions: it replaces the setup
+                // vertices entirely (official: `if (deformArray.length > 0) vertices = deformArray`).
+                // Only weighted meshes treat deform as per-vertex deltas added to the setup vertices.
+                val vx = if (hasDeform && v < deform.size) deform[v] else vertices[v]
+                val vy = if (hasDeform && v + 1 < deform.size) deform[v + 1] else vertices[v + 1]
                 worldVertices[w] = vx * bA + vy * bB + bX
                 worldVertices[w + 1] = vx * bC + vy * bD + bY
                 v += 2
@@ -480,16 +483,10 @@ class Bone38(val data: BoneData38, val skeleton: Skeleton38, val parent: Bone38?
             val rotationY = rotation + 90f + shearY
             val sx = skeleton.scaleX
             val sy = skeleton.scaleY
-            val radX = rotation * MathUtils.degRad
-            val radY = rotationY * MathUtils.degRad
-            val cosX = cos(radX) * scaleX * sx
-            val sinX = sin(radX) * scaleX * sx
-            val cosY = cos(radY) * scaleY * sy
-            val sinY = sin(radY) * scaleY * sy
-            a = cosX
-            b = cosY
-            c = sinX
-            d = sinY
+            a = cos((rotation + shearX) * MathUtils.degRad) * scaleX * sx
+            b = cos(rotationY * MathUtils.degRad) * scaleY * sx
+            c = sin((rotation + shearX) * MathUtils.degRad) * scaleX * sy
+            d = sin(rotationY * MathUtils.degRad) * scaleY * sy
             worldX = x * sx + skeleton.x
             worldY = y * sy + skeleton.y
             return
@@ -502,18 +499,90 @@ class Bone38(val data: BoneData38, val skeleton: Skeleton38, val parent: Bone38?
         worldX = pa * x + pb * y + parent.worldX
         worldY = pc * x + pd * y + parent.worldY
 
-        val rotationY = rotation + 90f + shearY
-        val radX = rotation * MathUtils.degRad
-        val radY = rotationY * MathUtils.degRad
-        val cosX = cos(radX) * scaleX
-        val sinX = sin(radX) * scaleX
-        val cosY = cos(radY) * scaleY
-        val sinY = sin(radY) * scaleY
-
-        a = pa * cosX + pb * sinX
-        b = pa * cosY + pb * sinY
-        c = pc * cosX + pd * sinX
-        d = pc * cosY + pd * sinY
+        when (data.transformMode) {
+            TransformMode38.normal -> {
+                val rotationY = rotation + 90f + shearY
+                val la = cos((rotation + shearX) * MathUtils.degRad) * scaleX
+                val lb = cos(rotationY * MathUtils.degRad) * scaleY
+                val lc = sin((rotation + shearX) * MathUtils.degRad) * scaleX
+                val ld = sin(rotationY * MathUtils.degRad) * scaleY
+                a = pa * la + pb * lc
+                b = pa * lb + pb * ld
+                c = pc * la + pd * lc
+                d = pc * lb + pd * ld
+                return
+            }
+            TransformMode38.onlyTranslation -> {
+                val rotationY = rotation + 90f + shearY
+                a = cos((rotation + shearX) * MathUtils.degRad) * scaleX
+                b = cos(rotationY * MathUtils.degRad) * scaleY
+                c = sin((rotation + shearX) * MathUtils.degRad) * scaleX
+                d = sin(rotationY * MathUtils.degRad) * scaleY
+            }
+            TransformMode38.noRotationOrReflection -> {
+                var s = pa * pa + pc * pc
+                var la = 0f; var lb = 0f; var lc = 0f; var ld = 0f
+                if (s > 0.0001f) {
+                    s = abs(pa * pd - pb * pc) / s
+                    val pa2 = pa / skeleton.scaleX
+                    val pc2 = pc / skeleton.scaleY
+                    val pb2 = pc2 * s
+                    val pd2 = pa2 * s
+                    val prx = atan2(pc2, pa2) * MathUtils.radDeg
+                    val rx = rotation + shearX - prx
+                    val ry = rotation + shearY - prx + 90f
+                    la = cos(rx * MathUtils.degRad) * scaleX
+                    lb = cos(ry * MathUtils.degRad) * scaleY
+                    lc = sin(rx * MathUtils.degRad) * scaleX
+                    ld = sin(ry * MathUtils.degRad) * scaleY
+                    a = pa2 * la - pb2 * lc
+                    b = pa2 * lb - pb2 * ld
+                    c = pc2 * la + pd2 * lc
+                    d = pc2 * lb + pd2 * ld
+                } else {
+                    val prx = 90f - atan2(pd, pb) * MathUtils.radDeg
+                    val rx = rotation + shearX - prx
+                    val ry = rotation + shearY - prx + 90f
+                    la = cos(rx * MathUtils.degRad) * scaleX
+                    lb = cos(ry * MathUtils.degRad) * scaleY
+                    lc = sin(rx * MathUtils.degRad) * scaleX
+                    ld = sin(ry * MathUtils.degRad) * scaleY
+                    a = -pb * lc
+                    b = -pb * ld
+                    c = pd * lc
+                    d = pd * ld
+                }
+            }
+            TransformMode38.noScale, TransformMode38.noScaleOrReflection -> {
+                val cosR = cos(rotation * MathUtils.degRad)
+                val sinR = sin(rotation * MathUtils.degRad)
+                var za = (pa * cosR + pb * sinR) / skeleton.scaleX
+                var zc = (pc * cosR + pd * sinR) / skeleton.scaleY
+                var s = sqrt(za * za + zc * zc)
+                if (s > 0.00001f) s = 1f / s
+                za *= s
+                zc *= s
+                s = sqrt(za * za + zc * zc)
+                if (data.transformMode == TransformMode38.noScale
+                    && (pa * pd - pb * pc < 0) != (skeleton.scaleX < 0 != skeleton.scaleY < 0)
+                ) s = -s
+                val r = MathUtils.PI / 2f + atan2(zc, za)
+                val zb = cos(r) * s
+                val zd = sin(r) * s
+                val la = cos(shearX * MathUtils.degRad) * scaleX
+                val lb = cos((90f + shearY) * MathUtils.degRad) * scaleY
+                val lc = sin(shearX * MathUtils.degRad) * scaleX
+                val ld = sin((90f + shearY) * MathUtils.degRad) * scaleY
+                a = za * la + zb * lc
+                b = za * lb + zb * ld
+                c = zc * la + zd * lc
+                d = zc * lb + zd * ld
+            }
+        }
+        a *= skeleton.scaleX
+        b *= skeleton.scaleX
+        c *= skeleton.scaleY
+        d *= skeleton.scaleY
     }
 }
 
@@ -671,6 +740,12 @@ abstract class CurveTimeline38(val frameCount: Int) : Timeline38 {
     }
 }
 
+interface XyFrameTimeline38 : Timeline38 {
+    val frames: FloatArray
+    var boneIndex: Int
+    fun setFrame(frameIndex: Int, time: Float, x: Float, y: Float)
+}
+
 class RotateTimeline38(frameCount: Int) : CurveTimeline38(frameCount) {
     var boneIndex: Int = 0
     val frames = FloatArray(frameCount * 2) // time, degrees
@@ -715,11 +790,11 @@ class RotateTimeline38(frameCount: Int) : CurveTimeline38(frameCount) {
     }
 }
 
-class TranslateTimeline38(frameCount: Int) : CurveTimeline38(frameCount) {
-    var boneIndex: Int = 0
-    val frames = FloatArray(frameCount * 3) // time, x, y
+class TranslateTimeline38(frameCount: Int) : CurveTimeline38(frameCount), XyFrameTimeline38 {
+    override var boneIndex: Int = 0
+    override val frames = FloatArray(frameCount * 3) // time, x, y
 
-    fun setFrame(frameIndex: Int, time: Float, x: Float, y: Float) {
+    override fun setFrame(frameIndex: Int, time: Float, x: Float, y: Float) {
         frames[frameIndex * 3] = time
         frames[frameIndex * 3 + 1] = x
         frames[frameIndex * 3 + 2] = y
@@ -767,11 +842,11 @@ class TranslateTimeline38(frameCount: Int) : CurveTimeline38(frameCount) {
     }
 }
 
-class ScaleTimeline38(frameCount: Int) : CurveTimeline38(frameCount) {
-    var boneIndex: Int = 0
-    val frames = FloatArray(frameCount * 3) // time, x, y
+class ScaleTimeline38(frameCount: Int) : CurveTimeline38(frameCount), XyFrameTimeline38 {
+    override var boneIndex: Int = 0
+    override val frames = FloatArray(frameCount * 3) // time, x, y
 
-    fun setFrame(frameIndex: Int, time: Float, x: Float, y: Float) {
+    override fun setFrame(frameIndex: Int, time: Float, x: Float, y: Float) {
         frames[frameIndex * 3] = time
         frames[frameIndex * 3 + 1] = x
         frames[frameIndex * 3 + 2] = y
@@ -815,6 +890,58 @@ class ScaleTimeline38(frameCount: Int) : CurveTimeline38(frameCount) {
         } else {
             bone.scaleX += (x - 1f) * bone.data.scaleX * alpha
             bone.scaleY += (y - 1f) * bone.data.scaleY * alpha
+        }
+    }
+}
+
+class ShearTimeline38(frameCount: Int) : CurveTimeline38(frameCount), XyFrameTimeline38 {
+    override var boneIndex: Int = 0
+    override val frames = FloatArray(frameCount * 3) // time, x, y
+
+    override fun setFrame(frameIndex: Int, time: Float, x: Float, y: Float) {
+        frames[frameIndex * 3] = time
+        frames[frameIndex * 3 + 1] = x
+        frames[frameIndex * 3 + 2] = y
+    }
+
+    override fun apply(skeleton: Skeleton38, lastTime: Float, time: Float, alpha: Float, blend: MixBlend38, direction: MixDirection38) {
+        val frames = this.frames
+        val bone = skeleton.bones[boneIndex]
+        if (time < frames[0]) {
+            if (blend == MixBlend38.setup || blend == MixBlend38.first) {
+                bone.shearX = bone.data.shearX
+                bone.shearY = bone.data.shearY
+            }
+            return
+        }
+        if (time >= frames[frames.size - 3]) {
+            val x = frames[frames.size - 2]
+            val y = frames[frames.size - 1]
+            if (blend == MixBlend38.setup || blend == MixBlend38.first) {
+                bone.shearX = bone.data.shearX + x * alpha
+                bone.shearY = bone.data.shearY + y * alpha
+            } else {
+                bone.shearX += x * alpha
+                bone.shearY += y * alpha
+            }
+            return
+        }
+
+        val frame = binarySearch(frames, time, 3)
+        val prevX = frames[frame - 2]
+        val prevY = frames[frame - 1]
+        val frameTime = frames[frame]
+        val percent = getCurvePercent(frame / 3 - 1, 1f - (time - frameTime) / (frames[frame - 3] - frameTime))
+
+        val x = prevX + (frames[frame + 1] - prevX) * percent
+        val y = prevY + (frames[frame + 2] - prevY) * percent
+
+        if (blend == MixBlend38.setup || blend == MixBlend38.first) {
+            bone.shearX = bone.data.shearX + x * alpha
+            bone.shearY = bone.data.shearY + y * alpha
+        } else {
+            bone.shearX += x * alpha
+            bone.shearY += y * alpha
         }
     }
 }
@@ -1155,65 +1282,55 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
     private val linkedMeshes = mutableListOf<LinkedMesh38>()
 
     fun readSkeletonData(file: FileHandle): SkeletonData38 {
-        val bytes = file.readBytes()
+        return readSkeletonData(file.readBytes())
+    }
+
+    fun readSkeletonData(bytes: ByteArray): SkeletonData38 {
         val data = SkeletonData38().apply { this.atlas = this@SkeletonBinary38.atlas }
         linkedMeshes.clear()
 
-        // 1. Precisely detect whether binary stream has an 8-byte Long hash (3.8+) or a String hash (3.6 / 3.7)
-        var isSpine38 = true
-        var versionStr = "3.8"
-        try {
-            if (bytes.size > 12) {
-                val testReader38 = BinaryStreamReader38(ByteArrayInputStream(bytes))
-                testReader38.readLong() // 8 bytes hash
-                val v38 = testReader38.readString()
-                if (v38 != null && v38.length in 3..14 && (v38.startsWith("3.8") || v38.startsWith("4."))) {
-                    isSpine38 = true
-                    versionStr = v38
-                } else {
-                    val testReader37 = BinaryStreamReader38(ByteArrayInputStream(bytes))
-                    testReader37.readString() // string hash in 3.6/3.7
-                    val v37 = testReader37.readString()
-                    if (v37 != null && v37.length in 3..14 && (v37.startsWith("3.7") || v37.startsWith("3.6") || v37.startsWith("3.5") || v37.startsWith("3."))) {
-                        isSpine38 = false
-                        versionStr = v37
-                    }
-                }
-            }
-        } catch (_: Exception) {
-            isSpine38 = true
+        val reader = BinaryStreamReader38(ByteArrayInputStream(bytes))
+
+        // Robust version detection.
+        // 3.6/3.7/3.8 start with a varint-length-prefixed String hash; 4.x starts with a raw 8-byte long hash.
+        val version = detectVersion(bytes) ?: "3.8"
+        data.version = version
+        val is36 = version.startsWith("3.6")
+        val is37 = version.startsWith("3.7")
+        val is38 = version.startsWith("3.8")
+        if (version.startsWith("4.")) {
+            throw RuntimeException("Spine 4.x binary cannot be read by the 3.x runtime (detected version $version)")
         }
 
-        val reader = BinaryStreamReader38(ByteArrayInputStream(bytes))
-        var nonessential = false
-        if (isSpine38) {
-            val hashLong = reader.readLong()
-            val version = reader.readString() ?: "3.8.99"
-            data.version = version
-            data.hash = if (hashLong != 0L) hashLong.toString() else null
+        // ---- Header ----
+        data.hash = reader.readString()
+        if (data.hash.isNullOrEmpty()) data.hash = null
+        reader.readString() // version string, already detected above
+        if (is38) {
             data.x = reader.readFloat() * scale
             data.y = reader.readFloat() * scale
-            data.width = reader.readFloat() * scale
-            data.height = reader.readFloat() * scale
-            nonessential = reader.readBoolean()
-            if (nonessential) {
-                data.fps = reader.readFloat()
-                data.imagesPath = reader.readString()
+        }
+        data.width = reader.readFloat() * scale
+        data.height = reader.readFloat() * scale
+
+        val nonessential = reader.readBoolean()
+        if (nonessential) {
+            data.fps = reader.readFloat()
+            data.imagesPath = reader.readString()
+            if (data.imagesPath.isNullOrEmpty()) data.imagesPath = null
+            if (!is36) {
                 data.audioPath = reader.readString()
-            }
-        } else {
-            data.hash = reader.readString()
-            data.version = reader.readString() ?: versionStr
-            data.width = reader.readFloat() * scale
-            data.height = reader.readFloat() * scale
-            nonessential = reader.readBoolean()
-            if (nonessential) {
-                data.fps = reader.readFloat()
-                data.imagesPath = reader.readString()
+                if (data.audioPath.isNullOrEmpty()) data.audioPath = null
             }
         }
 
-        // Bones (Direct inline strings, no indexed table in 3.8/3.7)
+        // ---- Strings table (3.8 only) ----
+        if (is38) {
+            val stringCount = reader.readVarint(true)
+            repeat(stringCount) { reader.strings.add(reader.readString() ?: "") }
+        }
+
+        // ---- Bones ----
         val boneCount = reader.readVarint(true)
         for (i in 0 until boneCount) {
             val name = reader.readString() ?: ""
@@ -1228,14 +1345,14 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
                 shearX = reader.readFloat()
                 shearY = reader.readFloat()
                 length = reader.readFloat() * scale
-                transformMode = TransformMode38.values()[reader.readVarint(true).coerceIn(0, 4)]
-                skinRequired = if (isSpine38) reader.readBoolean() else false
-                if (nonessential) reader.readInt() // color
+                transformMode = TransformMode38.values()[reader.readVarint(true).coerceIn(0, TransformMode38.values().lastIndex)]
+                if (is38) skinRequired = reader.readBoolean()
+                if (nonessential) reader.readInt() // bone color
             }
             data.bones.add(bone)
         }
 
-        // Slots
+        // ---- Slots ----
         val slotCount = reader.readVarint(true)
         for (i in 0 until slotCount) {
             val slotName = reader.readString() ?: ""
@@ -1258,18 +1375,18 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
                         1f
                     )
                 }
-                attachmentName = reader.readString()
-                blendMode = BlendMode38.values()[reader.readVarint(true).coerceIn(0, 3)]
+                attachmentName = if (is38) reader.readStringRef() else reader.readString()
+                blendMode = BlendMode38.values()[reader.readVarint(true).coerceIn(0, BlendMode38.values().lastIndex)]
             }
             data.slots.add(slotData)
         }
 
-        // IK Constraints
+        // ---- IK constraints ----
         val ikCount = reader.readVarint(true)
         for (i in 0 until ikCount) {
             val ik = IkConstraintData38(reader.readString() ?: "").apply {
                 order = reader.readVarint(true)
-                skinRequired = if (isSpine38) reader.readBoolean() else false
+                if (is38) skinRequired = reader.readBoolean()
                 val bonesSize = reader.readVarint(true)
                 for (b in 0 until bonesSize) {
                     val bIdx = reader.readVarint(true)
@@ -1278,21 +1395,23 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
                 val targetIdx = reader.readVarint(true)
                 target = if (targetIdx in data.bones.indices) data.bones[targetIdx] else (data.bones.firstOrNull() ?: BoneData38(0, "root", null))
                 mix = reader.readFloat()
-                softness = if (isSpine38) reader.readFloat() * scale else 0f
+                if (is38) softness = reader.readFloat() * scale
                 bendDirection = reader.readByte().toInt()
-                compress = if (isSpine38) reader.readBoolean() else false
-                stretch = if (isSpine38) reader.readBoolean() else false
-                uniform = if (isSpine38) reader.readBoolean() else false
+                if (is37 || is38) {
+                    compress = reader.readBoolean()
+                    stretch = reader.readBoolean()
+                    uniform = reader.readBoolean()
+                }
             }
             data.ikConstraints.add(ik)
         }
 
-        // Transform Constraints
+        // ---- Transform constraints ----
         val tfCount = reader.readVarint(true)
         for (i in 0 until tfCount) {
             val tf = TransformConstraintData38(reader.readString() ?: "").apply {
                 order = reader.readVarint(true)
-                skinRequired = if (isSpine38) reader.readBoolean() else false
+                if (is38) skinRequired = reader.readBoolean()
                 val bonesSize = reader.readVarint(true)
                 for (b in 0 until bonesSize) {
                     val bIdx = reader.readVarint(true)
@@ -1316,12 +1435,12 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
             data.transformConstraints.add(tf)
         }
 
-        // Path Constraints
+        // ---- Path constraints ----
         val pcCount = reader.readVarint(true)
         for (i in 0 until pcCount) {
             val pc = PathConstraintData38(reader.readString() ?: "").apply {
                 order = reader.readVarint(true)
-                skinRequired = if (isSpine38) reader.readBoolean() else false
+                if (is38) skinRequired = reader.readBoolean()
                 val bonesSize = reader.readVarint(true)
                 for (b in 0 until bonesSize) {
                     val bIdx = reader.readVarint(true)
@@ -1341,19 +1460,24 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
             data.pathConstraints.add(pc)
         }
 
-        // Default Skin
-        val defaultSkin = readSkin(reader, "default", true, nonessential, isSpine38)
+        // ---- Default skin ----
+        val defaultSkin = if (is38) readSkin38(reader, true, nonessential) else readSkin36(reader, "default", true, nonessential)
         data.defaultSkin = defaultSkin
         if (defaultSkin != null) data.skins.add(defaultSkin)
 
-        // Other Skins
+        // ---- Other skins ----
         val skinCount = reader.readVarint(true)
         for (i in 0 until skinCount) {
-            val skin = readSkin(reader, "", false, nonessential, isSpine38)
+            val skin = if (is38) {
+                readSkin38(reader, false, nonessential)
+            } else {
+                val skinName = reader.readString() ?: "skin_$i"
+                readSkin36(reader, skinName, false, nonessential)
+            }
             if (skin != null) data.skins.add(skin)
         }
 
-        // Link Meshes
+        // ---- Linked meshes ----
         for (lm in linkedMeshes) {
             val skin = if (lm.skinName == null) data.defaultSkin else (data.findSkin(lm.skinName) ?: data.defaultSkin)
             val parent = skin?.getAttachment(lm.slotIndex, lm.parentName ?: "") ?: data.defaultSkin?.getAttachment(lm.slotIndex, lm.parentName ?: "")
@@ -1368,29 +1492,30 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
             }
         }
 
-        // Events
+        // ---- Events ----
         val eventCount = reader.readVarint(true)
         for (i in 0 until eventCount) {
-            val ev = EventData38(reader.readString() ?: "").apply {
+            val ev = EventData38((if (is38) reader.readStringRef() else reader.readString()) ?: "").apply {
                 intValue = reader.readVarint(false)
                 floatValue = reader.readFloat()
-                stringValue = reader.readRawString()
-                audioPath = reader.readRawString()
-                if (audioPath != null) {
-                    volume = reader.readFloat()
-                    balance = reader.readFloat()
+                stringValue = reader.readString()
+                if (!is36) {
+                    audioPath = reader.readString()
+                    if (audioPath != null) {
+                        volume = reader.readFloat()
+                        balance = reader.readFloat()
+                    }
                 }
             }
             data.events.add(ev)
         }
 
-        // Animations
+        // ---- Animations ----
         val animationCount = reader.readVarint(true)
         for (i in 0 until animationCount) {
             val animName = reader.readString() ?: "anim_$i"
             try {
-                val anim = readAnimation(reader, animName, data)
-                data.animations.add(anim)
+                data.animations.add(readAnimation(reader, animName, data, is36, is38))
             } catch (e: Exception) {
                 data.animations.add(Animation38(animName, 1.0f))
             }
@@ -1399,44 +1524,42 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
         return data
     }
 
-    private fun readSkin(reader: BinaryStreamReader38, skinName: String, isDefaultSkin: Boolean, nonessential: Boolean, isSpine38: Boolean): Skin38? {
-        val skin: Skin38
-        val slotCount: Int
-        if (isSpine38) {
-            if (isDefaultSkin) {
-                slotCount = reader.readVarint(true)
-                if (slotCount == 0) return null
-                skin = Skin38("default")
-            } else {
-                val name = reader.readString() ?: skinName
-                skin = Skin38(name)
-                if (nonessential) {
-                    reader.readInt() // skin color
+    private fun detectVersion(bytes: ByteArray): String? {
+        // 3.x: varint-length-prefixed String hash, then version String.
+        try {
+            val r = BinaryStreamReader38(ByteArrayInputStream(bytes))
+            val len = r.readVarint(true)
+            when (len) {
+                0, 1 -> r.readString() // null or empty hash
+                in 2..256 -> {
+                    val raw = r.readRawBytes(len - 1)
+                    if (!raw.all { it in 32..126 }) throw EOFException()
                 }
-                val boneCount = reader.readVarint(true)
-                for (i in 0 until boneCount) reader.readVarint(true)
-                val ikCount = reader.readVarint(true)
-                for (i in 0 until ikCount) reader.readVarint(true)
-                val tfCount = reader.readVarint(true)
-                for (i in 0 until tfCount) reader.readVarint(true)
-                val pathCount = reader.readVarint(true)
-                for (i in 0 until pathCount) reader.readVarint(true)
-                slotCount = reader.readVarint(true)
+                else -> throw EOFException()
             }
-        } else {
-            // Spine 3.6 / 3.7 skins (standard slot list format for both default and other skins)
-            val name = if (isDefaultSkin) "default" else (reader.readString() ?: skinName)
-            slotCount = reader.readVarint(true)
-            if (slotCount == 0 && isDefaultSkin) return null
-            skin = Skin38(name)
-        }
+            val v = r.readString()
+            if (v != null && (v.startsWith("3.") || v.startsWith("4."))) return v
+        } catch (_: Exception) {}
+        // 4.x: raw 8-byte long hash, then version String.
+        try {
+            val r2 = BinaryStreamReader38(ByteArrayInputStream(bytes))
+            r2.readLong()
+            val v = r2.readString()
+            if (v != null && v.startsWith("4.")) return v
+        } catch (_: Exception) {}
+        return null
+    }
 
+    private fun readSkin36(reader: BinaryStreamReader38, skinName: String, isDefaultSkin: Boolean, nonessential: Boolean): Skin38? {
+        val slotCount = reader.readVarint(true)
+        if (slotCount == 0 && isDefaultSkin) return null
+        val skin = Skin38(if (isDefaultSkin) "default" else skinName)
         for (i in 0 until slotCount) {
             val slotIndex = reader.readVarint(true)
             val attachmentCount = reader.readVarint(true)
             for (ii in 0 until attachmentCount) {
                 val placeholderName = reader.readString() ?: ""
-                val attachment = readAttachment(reader, slotIndex, placeholderName, nonessential)
+                val attachment = readAttachment(reader, slotIndex, placeholderName, nonessential, false)
                 if (attachment != null) {
                     skin.setAttachment(slotIndex, placeholderName, attachment)
                 }
@@ -1445,12 +1568,47 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
         return skin
     }
 
-    private fun readAttachment(reader: BinaryStreamReader38, slotIndex: Int, defaultName: String, nonessential: Boolean): Attachment38? {
-        val name = reader.readString() ?: defaultName
+    private fun readSkin38(reader: BinaryStreamReader38, isDefaultSkin: Boolean, nonessential: Boolean): Skin38? {
+        val skin: Skin38
+        val slotCount: Int
+        if (isDefaultSkin) {
+            slotCount = reader.readVarint(true)
+            if (slotCount == 0) return null
+            skin = Skin38("default")
+        } else {
+            val name = reader.readStringRef() ?: "skin"
+            skin = Skin38(name)
+            if (nonessential) reader.readInt() // skin color
+            val boneCount = reader.readVarint(true)
+            for (i in 0 until boneCount) reader.readVarint(true)
+            val ikCount = reader.readVarint(true)
+            for (i in 0 until ikCount) reader.readVarint(true)
+            val tfCount = reader.readVarint(true)
+            for (i in 0 until tfCount) reader.readVarint(true)
+            val pathCount = reader.readVarint(true)
+            for (i in 0 until pathCount) reader.readVarint(true)
+            slotCount = reader.readVarint(true)
+        }
+        for (i in 0 until slotCount) {
+            val slotIndex = reader.readVarint(true)
+            val attachmentCount = reader.readVarint(true)
+            for (ii in 0 until attachmentCount) {
+                val placeholderName = reader.readStringRef() ?: ""
+                val attachment = readAttachment(reader, slotIndex, placeholderName, nonessential, true)
+                if (attachment != null) {
+                    skin.setAttachment(slotIndex, placeholderName, attachment)
+                }
+            }
+        }
+        return skin
+    }
+
+    private fun readAttachment(reader: BinaryStreamReader38, slotIndex: Int, defaultName: String, nonessential: Boolean, is38: Boolean): Attachment38? {
+        val name = (if (is38) reader.readStringRef() else reader.readString()) ?: defaultName
         val type = reader.readByte().toInt()
         when (type) {
             0 -> { // Region
-                val path = reader.readString() ?: name
+                val path = (if (is38) reader.readStringRef() else reader.readString()) ?: name
                 val regionAtt = RegionAttachment38(name)
                 regionAtt.path = path
                 regionAtt.rotation = reader.readFloat()
@@ -1479,7 +1637,7 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
                 return null
             }
             2 -> { // Mesh
-                val path = reader.readString() ?: name
+                val path = (if (is38) reader.readStringRef() else reader.readString()) ?: name
                 val colorInt = reader.readInt()
                 val vertexCount = reader.readVarint(true)
                 val uvs = FloatArray(vertexCount * 2)
@@ -1518,10 +1676,10 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
                 return mesh
             }
             3 -> { // LinkedMesh
-                val path = reader.readString() ?: name
+                val path = (if (is38) reader.readStringRef() else reader.readString()) ?: name
                 val colorInt = reader.readInt()
-                val skinName = reader.readString()
-                val parentName = reader.readString()
+                val skinName = if (is38) reader.readStringRef() else reader.readString()
+                val parentName = if (is38) reader.readStringRef() else reader.readString()
                 val inheritDeform = reader.readBoolean()
                 if (nonessential) {
                     reader.readFloat() // width
@@ -1590,7 +1748,7 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
         return Pair(bonesArray.toArray(), weights.toArray())
     }
 
-    private fun readAnimation(reader: BinaryStreamReader38, name: String, skeletonData: SkeletonData38): Animation38 {
+    private fun readAnimation(reader: BinaryStreamReader38, name: String, skeletonData: SkeletonData38, is36: Boolean, is38: Boolean): Animation38 {
         var duration = 0f
         val animation = Animation38(name, 1f)
 
@@ -1608,7 +1766,7 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
                         timeline.slotIndex = slotIndex
                         for (frameIndex in 0 until frameCount) {
                             val time = reader.readFloat()
-                            val attName = reader.readString()
+                            val attName = if (is38) reader.readStringRef() else reader.readString()
                             timeline.setFrame(frameIndex, time, attName)
                         }
                         animation.timelines.add(timeline)
@@ -1658,20 +1816,21 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
                         duration = maxOf(duration, timeline.frames[(frameCount - 1) * 2])
                     }
                     1, 2, 3 -> { // Translate, Scale, Shear
-                        val timeline = if (timelineType == 1) TranslateTimeline38(frameCount) else ScaleTimeline38(frameCount)
-                        if (timeline is TranslateTimeline38) timeline.boneIndex = boneIndex
-                        if (timeline is ScaleTimeline38) timeline.boneIndex = boneIndex
+                        val timeline: XyFrameTimeline38 = when (timelineType) {
+                            1 -> TranslateTimeline38(frameCount).also { it.boneIndex = boneIndex }
+                            2 -> ScaleTimeline38(frameCount).also { it.boneIndex = boneIndex }
+                            else -> ShearTimeline38(frameCount).also { it.boneIndex = boneIndex }
+                        }
+                        val timelineScale = if (timelineType == 1) scale else 1f
                         for (frameIndex in 0 until frameCount) {
                             val time = reader.readFloat()
-                            val x = reader.readFloat() * if (timelineType == 1) scale else 1f
-                            val y = reader.readFloat() * if (timelineType == 1) scale else 1f
-                            if (timeline is TranslateTimeline38) timeline.setFrame(frameIndex, time, x, y)
-                            if (timeline is ScaleTimeline38) timeline.setFrame(frameIndex, time, x, y)
-                            if (frameIndex < frameCount - 1) readCurve(reader, frameIndex, timeline)
+                            val x = reader.readFloat() * timelineScale
+                            val y = reader.readFloat() * timelineScale
+                            timeline.setFrame(frameIndex, time, x, y)
+                            if (frameIndex < frameCount - 1) readCurve(reader, frameIndex, timeline as CurveTimeline38)
                         }
                         animation.timelines.add(timeline)
-                        val lastTime = if (timeline is TranslateTimeline38) timeline.frames[(frameCount - 1) * 3] else (timeline as ScaleTimeline38).frames[(frameCount - 1) * 3]
-                        duration = maxOf(duration, lastTime)
+                        duration = maxOf(duration, timeline.frames[(frameCount - 1) * 3])
                     }
                 }
             }
@@ -1683,7 +1842,13 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
             val ikIndex = reader.readVarint(true)
             val frameCount = reader.readVarint(true)
             for (f in 0 until frameCount) {
-                reader.readFloat(); reader.readFloat(); reader.readFloat(); reader.readByte(); reader.readBoolean(); reader.readBoolean()
+                if (is36) {
+                    reader.readFloat(); reader.readFloat(); reader.readByte()
+                } else if (is38) {
+                    reader.readFloat(); reader.readFloat(); reader.readFloat(); reader.readByte(); reader.readBoolean(); reader.readBoolean()
+                } else {
+                    reader.readFloat(); reader.readFloat(); reader.readByte(); reader.readBoolean(); reader.readBoolean()
+                }
                 if (f < frameCount - 1) readCurveStub(reader)
             }
         }
@@ -1727,26 +1892,47 @@ class SkeletonBinary38(val atlas: TextureAtlas) {
                 val slotIndex = reader.readVarint(true)
                 val timelineCount = reader.readVarint(true)
                 for (iii in 0 until timelineCount) {
-                    val attachmentName = reader.readString() ?: ""
+                    val attachmentName = if (is38) reader.readStringRef() else reader.readString()
                     val frameCount = reader.readVarint(true)
                     val timeline = DeformTimeline38(frameCount)
                     timeline.slotIndex = slotIndex
                     timeline.skin = skin
+                    timeline.attachment = skin?.getAttachment(slotIndex, attachmentName ?: "")
+
+                    // Spine 3.x deform values are per-vertex deltas whose array length is fixed by the
+                    // referenced vertex attachment (weighted ? vertices.length / 3 * 2 : vertices.length).
+                    // Always allocate full-length arrays so apply() never sees mismatched sizes.
+                    val meshRef = timeline.attachment as? MeshAttachment38
+                    val weighted = meshRef?.bones != null
+                    var deformLength = meshRef?.vertices?.let { if (weighted) it.size / 3 * 2 else it.size } ?: 0
+                    var maxSpan = 0
                     for (frameIndex in 0 until frameCount) {
                         val time = reader.readFloat()
                         val end = reader.readVarint(true)
                         val vertices: FloatArray
                         if (end == 0) {
-                            vertices = FloatArray(0)
+                            vertices = FloatArray(deformLength)
                         } else {
                             val start = reader.readVarint(true)
-                            vertices = FloatArray(start + end)
+                            if (start + end > maxSpan) maxSpan = start + end
+                            if (deformLength == 0) deformLength = start + end
+                            vertices = FloatArray(deformLength)
                             for (v in start until start + end) {
-                                vertices[v] = reader.readFloat() * scale
+                                val value = reader.readFloat() * scale
+                                if (v < deformLength) vertices[v] = value
                             }
                         }
                         timeline.setFrame(frameIndex, time, vertices)
                         if (frameIndex < frameCount - 1) readCurve(reader, frameIndex, timeline)
+                    }
+                    if (deformLength == 0) deformLength = maxSpan
+                    if (deformLength > 0) {
+                        for (f in 0 until frameCount) {
+                            val a = timeline.frameVertices[f]
+                            if (a != null && a.size != deformLength) {
+                                timeline.frameVertices[f] = a.copyOf(deformLength)
+                            }
+                        }
                     }
                     animation.timelines.add(timeline)
                     duration = maxOf(duration, timeline.frames[frameCount - 1])
@@ -1854,6 +2040,24 @@ class ColorTimeline38(frameCount: Int) : CurveTimeline38(frameCount) {
 }
 
 class BinaryStreamReader38(private val input: InputStream) {
+    val strings = mutableListOf<String>()
+
+    fun readRawBytes(count: Int): ByteArray {
+        if (count < 0) throw EOFException("Negative byte count")
+        val bytes = ByteArray(count)
+        var total = 0
+        while (total < bytes.size) {
+            val n = input.read(bytes, total, bytes.size - total)
+            if (n == -1) throw EOFException()
+            total += n
+        }
+        return bytes
+    }
+
+    fun readStringRef(): String? {
+        val index = readVarint(true)
+        return if (index == 0) null else strings.getOrNull(index - 1)
+    }
 
     fun readByte(): Byte {
         val b = input.read()
