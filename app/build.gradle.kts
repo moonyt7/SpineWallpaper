@@ -32,7 +32,20 @@ android {
         }
     }
 
+    signingConfigs {
+        // 将默认 debug 签名的密钥文件指向可写位置，绕开 ~/.android 被系统安全软件锁定的问题
+        getByName("debug") {
+            val customDebugKey = file("C:/Users/WWW/AppData/Local/Temp/debug.keystore")
+            if (customDebugKey.exists()) {
+                storeFile = customDebugKey
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -66,20 +79,19 @@ android {
 // Automatically extract libGDX native .so binaries from platform jars into jniLibs
 tasks.register("copyAndroidNatives") {
     doFirst {
-        file("src/main/jniLibs/armeabi-v7a").mkdirs()
-        file("src/main/jniLibs/arm64-v8a").mkdirs()
-        file("src/main/jniLibs/x86").mkdirs()
-        file("src/main/jniLibs/x86_64").mkdirs()
+        // 幂等：jniLibs 目录已有 .so 时跳过，避免 Windows 下覆盖已存在文件失败
+        val abiDirs = linkedMapOf(
+            "arm64-v8a" to file("src/main/jniLibs/arm64-v8a"),
+            "armeabi-v7a" to file("src/main/jniLibs/armeabi-v7a"),
+            "x86_64" to file("src/main/jniLibs/x86_64"),
+            "x86" to file("src/main/jniLibs/x86")
+        )
+        abiDirs.values.forEach { it.mkdirs() }
 
         natives.files.forEach { jar ->
-            val outputDir = when {
-                jar.name.contains("arm64-v8a") -> file("src/main/jniLibs/arm64-v8a")
-                jar.name.contains("armeabi-v7a") -> file("src/main/jniLibs/armeabi-v7a")
-                jar.name.contains("x86_64") -> file("src/main/jniLibs/x86_64")
-                jar.name.contains("x86") -> file("src/main/jniLibs/x86")
-                else -> null
-            }
-            if (outputDir != null) {
+            val outputDir = abiDirs.entries.firstOrNull { jar.name.contains(it.key) }?.value ?: return@forEach
+            val hasSo = outputDir.listFiles()?.any { it.name.endsWith(".so") } ?: false
+            if (!hasSo) {
                 copy {
                     from(zipTree(jar))
                     into(outputDir)
@@ -97,8 +109,15 @@ tasks.configureEach {
 }
 
 dependencies {
-    // Official Spine 4.1.0 Runtime (spine-libgdx on Maven Central)
-    implementation("com.esotericsoftware.spine:spine-libgdx:4.1.0")
+    // Multi-Runtime Isolated Modules (No package collisions!)
+    // 各 runtime 模块以 shadowArtifact 形式提供重定位后的官方 spine-libgdx runtime
+    implementation(project(":spine-core-bridge"))
+    implementation(project(":spine-runtime-v36", configuration = "shadowArtifact"))
+    implementation(project(":spine-runtime-v37", configuration = "shadowArtifact"))
+    implementation(project(":spine-runtime-v38", configuration = "shadowArtifact"))
+    implementation(project(":spine-runtime-v40", configuration = "shadowArtifact"))
+    implementation(project(":spine-runtime-v41", configuration = "shadowArtifact"))
+    implementation(project(":spine-runtime-v42", configuration = "shadowArtifact"))
 
     // libGDX 1.13.1+ for 16 KB page size alignment support on Android 15+
     implementation("com.badlogicgames.gdx:gdx:1.13.1")

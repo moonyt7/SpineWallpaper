@@ -15,7 +15,6 @@ import com.badlogic.gdx.graphics.OrthographicCamera
 import com.badlogic.gdx.graphics.Texture
 import com.badlogic.gdx.graphics.g2d.PolygonSpriteBatch
 import com.badlogic.gdx.graphics.g2d.TextureAtlas
-import com.esotericsoftware.spine.*
 import com.spine.wallpaper.loader.SpineModelLoader
 import com.spine.wallpaper.model.Live2DConfig
 import org.json.JSONObject
@@ -34,7 +33,7 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     private var modelDir: File? = null
     private var isModelPending = false
 
-    private var modelInstance: com.spine.wallpaper.adapter.ISpineModelInstance? = null
+    private var modelInstance: com.spine.wallpaper.bridge.ISpineModelAdapter? = null
     private var atlas: TextureAtlas? = null
     private var config: Live2DConfig? = null
 
@@ -335,12 +334,22 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
 
             config = configFile?.let { Live2DConfig.parse(it.readText()) }
 
-            val atlasHandle = com.spine.wallpaper.adapter.SpineVersionAdapter.sanitizeAtlasFile(atlasFile)
-            val loadedAtlas = TextureAtlas(atlasHandle)
+            val atlasHandle = com.spine.wallpaper.bridge.AtlasSanitizer.sanitize(atlasFile)
+            val loadedAtlas: TextureAtlas = try {
+                TextureAtlas(atlasHandle)
+            } catch (e: Throwable) {
+                e.printStackTrace()
+                try {
+                    TextureAtlas(FileHandle(atlasFile))
+                } catch (e2: Throwable) {
+                    e2.printStackTrace()
+                    TextureAtlas()
+                }
+            }
             this.atlas = loadedAtlas
 
-            // Create Universal Multi-Version Model Instance (3.6, 3.7, 3.8, 4.0, 4.1, 4.2)
-            val instance = com.spine.wallpaper.adapter.SpineVersionAdapter.createModelInstance(
+            // Create Multi-Version Model Adapter via Multi-Runtime Dispatcher
+            val instance = com.spine.wallpaper.bridge.SpineMultiRuntimeManager.createModelAdapter(
                 skelFile = skelFile,
                 atlas = loadedAtlas,
                 scale = config?.scale ?: 1.0f,
@@ -446,7 +455,7 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
             pBatch.draw(bg, 0f, 0f, width.toFloat(), height.toFloat())
         }
 
-        // 2. Draw Spine model (Universal multi-version instance)
+        // 2. Draw Spine model (Multi-runtime isolated adapter)
         val model = modelInstance
         if (model != null) {
             model.setPremultipliedAlpha(isPma)
@@ -455,10 +464,9 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
             val safeScale = if (scale > 0.001f) scale else 1.0f
             val centerX = width / 2.0f + posX * width
             val centerY = height / 2.0f + posY * height
-            model.setPosition(centerX, centerY)
-            model.setScale(safeScale, safeScale)
+            model.setTransform(safeScale, centerX, centerY)
 
-            model.draw(pBatch)
+            model.render(pBatch)
         }
 
         pBatch.end()

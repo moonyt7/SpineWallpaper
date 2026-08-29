@@ -2,7 +2,7 @@ package com.spine.wallpaper.loader
 
 import android.content.Context
 import android.net.Uri
-import com.spine.wallpaper.adapter.SpineVersionAdapter
+import com.spine.wallpaper.bridge.SpineVersionDetector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -213,20 +213,28 @@ object SpineModelLoader {
                 stagingDir.copyRecursively(targetDir, overwrite = true)
             }
 
+            // Also mirror any nested image/texture files from stagingDir to targetDir to prevent subfolder path resolution errors
+            stagingDir.walkTopDown().filter { it.isFile }.forEach { f ->
+                val flatTarget = File(targetDir, f.name)
+                if (!flatTarget.exists()) {
+                    try { f.copyTo(flatTarget, overwrite = true) } catch (_: Exception) {}
+                }
+            }
+
             val relativePath = skelFile.relativeTo(if (parentDir != stagingDir) parentDir else stagingDir).path
             val targetSkelFile = File(targetDir, relativePath)
             val finalSkelFile = if (targetSkelFile.exists()) targetSkelFile else skelFile
 
             // Detect Spine Version (3.6, 3.7, 3.8, 4.0, 4.1, 4.2)
-            val detectedVer = SpineVersionAdapter.detectVersion(finalSkelFile)
-            val detectedFmt = SpineVersionAdapter.detectFormat(finalSkelFile)
+            val detectedVer = SpineVersionDetector.detectVersionString(finalSkelFile)
+            val detectedFmt = SpineVersionDetector.detectFormat(finalSkelFile)
 
             val base = skelFile.nameWithoutExtension.removeSuffix(".skel").removeSuffix(".json")
             val matchedAtlas = allFiles.firstOrNull { 
                 it.name.startsWith(base, ignoreCase = true) && (it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt")) 
             } ?: allFiles.firstOrNull { it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt") }
 
-            val (anims, skins) = SpineVersionAdapter.peekAnimationsAndSkins(finalSkelFile, matchedAtlas)
+            val (anims, skins) = SpineVersionDetector.peekAnimationsAndSkins(finalSkelFile, matchedAtlas)
 
             val item = SpineModelItem(
                 id = modelId,

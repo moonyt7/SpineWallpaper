@@ -49,6 +49,13 @@ import java.util.*
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Safeguard intent and bundle extras to prevent MIUI SuggestManager / ActivityThread deliverResultsIfNeeded NPE
+        if (intent == null) {
+            intent = Intent()
+        }
+        if (intent.extras == null) {
+            intent.putExtras(Bundle())
+        }
         super.onCreate(savedInstanceState)
         try {
             SpineModelLoader.ensureNativesLoaded()
@@ -65,6 +72,16 @@ class MainActivity : ComponentActivity() {
             ) {
                 SpineWallpaperApp()
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent != null) {
+            if (intent.extras == null) {
+                intent.putExtras(Bundle())
+            }
+            setIntent(intent)
         }
     }
 }
@@ -113,7 +130,9 @@ fun SpineWallpaperApp() {
                 activeModelDir = File(activeItem.folderPath)
                 animationList = activeItem.animations
                 skinList = activeItem.skins
-                currentAnimation = activeItem.animations.firstOrNull()
+                // 恢复上次选中的动画，避免启动后总是回到第一个
+                val savedAnim = prefs.getString("active_animation_name", null)
+                currentAnimation = if (savedAnim != null && activeItem.animations.contains(savedAnim)) savedAnim else activeItem.animations.firstOrNull()
                 currentSkin = activeItem.skins.firstOrNull()
             } else {
                 activeModelDir = SpineModelLoader.getActiveModelDir(context)
@@ -622,7 +641,7 @@ fun SpineWallpaperApp() {
                                                     .putInt("bg_color", argb)
                                                     .remove("bg_image_path")
                                                     .apply()
-                                                Toast.makeText(context, "已切换为${name}背景", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, "已切换为背景", Toast.LENGTH_SHORT).show()
                                             },
                                         contentAlignment = Alignment.Center
                                     ) {
@@ -936,16 +955,16 @@ fun SpineWallpaperApp() {
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(
-                            "本应用内置了全版本自适应解析器，支持自动识别并加载主流 Spine 模型：",
+                            "本应用内置了多版本运行时隔离引擎，支持自适应检测并加载主流 Spine 模型：",
                             color = Color(0xFFCBD5E1),
                             fontSize = 13.sp
                         )
 
                         val versionDetails = listOf(
-                            Triple("v3.8 (主流游戏)", "完整支持 .skel 二进制 & .json，适配明日方舟、蔚蓝档案、碧蓝航线等", Color(0xFF059669)),
-                            Triple("v4.1 (原生运行时)", "官方原生 spine-android 4.1 运行时直接高速解析", Color(0xFF4F46E5)),
-                            Triple("v3.7 / 3.6", "兼容旧版 Spine 结构，自动适配骨骼、插槽与附件", Color(0xFFD97706)),
-                            Triple("v4.0 / 4.2", "自动兼容曲线插值格式与序列帧附件", Color(0xFF9333EA))
+                            Triple("v3.8 (主流游戏)", "独立模块 :spine-runtime-v38 隔离运行，支持明日方舟、蔚蓝档案等", Color(0xFF059669)),
+                            Triple("v4.0 (官方隔离)", "独立模块 :spine-runtime-v40 隔离运行", Color(0xFF0891B2)),
+                            Triple("v4.1 (官方隔离)", "独立模块 :spine-runtime-v41 隔离运行", Color(0xFF4F46E5)),
+                            Triple("v4.2 (官方隔离)", "独立模块 :spine-runtime-v42 隔离运行", Color(0xFF9333EA))
                         )
 
                         versionDetails.forEach { (ver, desc, color) ->
@@ -980,7 +999,7 @@ fun SpineWallpaperApp() {
                         }
 
                         Text(
-                            "💡 导入提示：直接将包含 .skel/.json、.atlas 和 .png 的 .zip 文件导入即可，系统会自动检测版本并纠正纹理路径。",
+                            "💡 导入提示：直接将包含 .skel/.json、.atlas 和 .png 的 .zip 文件导入即可，系统会自动检测版本并调用对应隔离运行时模块。",
                             color = Color(0xFF94A3B8),
                             fontSize = 11.sp
                         )
