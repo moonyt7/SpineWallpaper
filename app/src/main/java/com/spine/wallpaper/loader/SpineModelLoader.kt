@@ -369,6 +369,11 @@ object SpineModelLoader {
                 val nextId = list.firstOrNull()?.id
                 setActiveModelId(context, nextId)
             }
+
+            // 若被删除的是副模型（槽位1），同步清空槽位1
+            if (getModelId(context, 1) == modelId) {
+                setModelId(context, 1, null)
+            }
         }
     }
 
@@ -380,6 +385,39 @@ object SpineModelLoader {
     fun setActiveModelId(context: Context, modelId: String?) {
         val prefs = context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
         prefs.edit().putString("active_model_id", modelId).apply()
+    }
+
+    // ==================== 双模型槽位 (Live2DViewerEX 风格) ====================
+    // Slot 0 复用原有键（完全向后兼容）；Slot 1 使用 model2_* 前缀键。
+
+    object SlotPrefs {
+        fun idKey(slot: Int) = if (slot == 0) "active_model_id" else "model2_id"
+        fun scaleKey(slot: Int) = if (slot == 0) "model_scale" else "model2_scale"
+        fun posXKey(slot: Int) = if (slot == 0) "model_pos_x" else "model2_pos_x"
+        fun posYKey(slot: Int) = if (slot == 0) "model_pos_y" else "model2_pos_y"
+        fun animKey(slot: Int) = if (slot == 0) "active_animation_name" else "model2_animation"
+        fun skinKey(slot: Int) = if (slot == 0) "active_skin_name" else "model2_skin"
+    }
+
+    fun getModelId(context: Context, slot: Int): String? {
+        val prefs = context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
+        return prefs.getString(SlotPrefs.idKey(slot), null)
+    }
+
+    fun setModelId(context: Context, slot: Int, modelId: String?) {
+        val prefs = context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
+        if (slot == 0) {
+            prefs.edit().putString("active_model_id", modelId).apply()
+        } else {
+            prefs.edit().putString("model2_id", modelId).apply()
+        }
+    }
+
+    fun getModelDirById(context: Context, modelId: String?): File? {
+        if (modelId == null) return null
+        val item = getSavedModels(context).firstOrNull { it.id == modelId } ?: return null
+        val dir = File(item.folderPath)
+        return if (dir.exists()) dir else null
     }
 
     fun getActiveModelDir(context: Context): File? {

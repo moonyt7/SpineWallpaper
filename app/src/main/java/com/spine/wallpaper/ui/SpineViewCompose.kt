@@ -20,21 +20,34 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.spine.wallpaper.loader.SpineModelLoader
 import com.spine.wallpaper.service.SpineGlRenderer
 import java.io.File
 
+/**
+ * In-app dual-model preview (Live2DViewerEX style).
+ * Slot 0 = primary (behind), Slot 1 = secondary (front).
+ * Drag / pinch gestures adjust the currently selected slot's transform.
+ */
 @Composable
 fun SpineViewCompose(
     modelDir: File?,
+    model2Dir: File? = null,
+    selectedSlot: Int = 0,
     isPlaying: Boolean = true,
     scale: Float = 1.0f,
+    scale2: Float = 1.0f,
     pma: Boolean = true,
+    pma2: Boolean = true,
     activeAnimation: String? = null,
+    activeAnimation2: String? = null,
     activeSkin: String? = null,
+    activeSkin2: String? = null,
     bgColor: Color = Color(0xFF0F172A),
     bgImagePath: String? = null,
-    onScaleChange: ((Float) -> Unit)? = null,
-    onModelLoaded: ((animations: List<String>, skins: List<String>) -> Unit)? = null,
+    resetTick: Int = 0,
+    onScaleChange: ((slot: Int, scale: Float) -> Unit)? = null,
+    onModelLoaded: ((slot: Int, animations: List<String>, skins: List<String>) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -45,20 +58,43 @@ fun SpineViewCompose(
     var isLoading by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
 
-    // Read stored offset & scale
+    // Read stored offset & scale for both slots
     val prefs = remember { context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE) }
-    var currentScale by remember { mutableStateOf(prefs.getFloat("model_scale", scale)) }
-    var currentPosX by remember { mutableStateOf(prefs.getFloat("model_pos_x", 0.0f)) }
-    var currentPosY by remember { mutableStateOf(prefs.getFloat("model_pos_y", 0.0f)) }
+    val currentScale = remember {
+        floatArrayOf(
+            prefs.getFloat(SpineModelLoader.SlotPrefs.scaleKey(0), scale),
+            prefs.getFloat(SpineModelLoader.SlotPrefs.scaleKey(1), scale2)
+        )
+    }
+    val currentPosX = remember {
+        floatArrayOf(
+            prefs.getFloat(SpineModelLoader.SlotPrefs.posXKey(0), 0.0f),
+            prefs.getFloat(SpineModelLoader.SlotPrefs.posXKey(1), 0.0f)
+        )
+    }
+    val currentPosY = remember {
+        floatArrayOf(
+            prefs.getFloat(SpineModelLoader.SlotPrefs.posYKey(0), 0.0f),
+            prefs.getFloat(SpineModelLoader.SlotPrefs.posYKey(1), 0.0f)
+        )
+    }
+
+    // Gesture target slot (kept in a state so detector closures see fresh value)
+    val slotRef = remember { mutableIntStateOf(selectedSlot) }
+
+    fun applyTransform(slot: Int) {
+        renderer.updateTransform(currentScale[slot], currentPosX[slot], currentPosY[slot], slot)
+    }
 
     // Configure touch gesture detectors on preview SurfaceView
     val scaleDetector = remember {
         ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
-                currentScale = (currentScale * detector.scaleFactor).coerceIn(0.2f, 5.0f)
-                renderer.updateTransform(currentScale, currentPosX, currentPosY)
-                prefs.edit().putFloat("model_scale", currentScale).apply()
-                onScaleChange?.invoke(currentScale)
+                val slot = slotRef.intValue
+                currentScale[slot] = (currentScale[slot] * detector.scaleFactor).coerceIn(0.2f, 5.0f)
+                applyTransform(slot)
+                prefs.edit().putFloat(SpineModelLoader.SlotPrefs.scaleKey(slot), currentScale[slot]).apply()
+                onScaleChange?.invoke(slot, currentScale[slot])
                 return true
             }
         })
@@ -67,12 +103,13 @@ fun SpineViewCompose(
     val gestureDetector = remember {
         GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
             override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
-                currentPosX -= distanceX * 0.002f
-                currentPosY += distanceY * 0.002f
-                renderer.updateTransform(currentScale, currentPosX, currentPosY)
+                val slot = slotRef.intValue
+                currentPosX[slot] -= distanceX * 0.002f
+                currentPosY[slot] += distanceY * 0.002f
+                applyTransform(slot)
                 prefs.edit()
-                    .putFloat("model_pos_x", currentPosX)
-                    .putFloat("model_pos_y", currentPosY)
+                    .putFloat(SpineModelLoader.SlotPrefs.posXKey(slot), currentPosX[slot])
+                    .putFloat(SpineModelLoader.SlotPrefs.posYKey(slot), currentPosY[slot])
                     .apply()
                 return true
             }
@@ -85,9 +122,13 @@ fun SpineViewCompose(
     }
 
     LaunchedEffect(renderer, onModelLoaded) {
-        renderer.onModelLoadedListener = { anims, skins ->
-            onModelLoaded?.invoke(anims, skins)
+        renderer.onModelLoadedListener = { slot, anims, skins ->
+            onModelLoaded?.invoke(slot, anims, skins)
         }
+    }
+
+    LaunchedEffect(selectedSlot) {
+        slotRef.intValue = selectedSlot
     }
 
     LaunchedEffect(modelDir) {
@@ -95,9 +136,9 @@ fun SpineViewCompose(
             isLoading = true
             errorText = null
             try {
-                renderer.setModelDirectory(modelDir)
-                renderer.updateTransform(currentScale, currentPosX, currentPosY)
-                renderer.setPremultipliedAlpha(pma)
+                renderer.setModelDirectory(modelDir, SpineGlRenderer.SLOT_PRIMARY)
+                applyTransform(0)
+                renderer.setPremultipliedAlpha(pma, SpineGlRenderer.SLOT_PRIMARY)
                 renderer.setBackgroundColor(
                     bgColor.red,
                     bgColor.green,
@@ -112,28 +153,80 @@ fun SpineViewCompose(
                 isLoading = false
                 errorText = e.message ?: "模型解压与加载失败"
             }
+        } else {
+            renderer.setModelDirectory(null, SpineGlRenderer.SLOT_PRIMARY)
         }
     }
 
-    LaunchedEffect(scale) {
-        currentScale = scale
-        renderer.updateTransform(currentScale, currentPosX, currentPosY)
-        prefs.edit().putFloat("model_scale", currentScale).apply()
+    LaunchedEffect(model2Dir) {
+        if (model2Dir != null && model2Dir.exists()) {
+            try {
+                renderer.setModelDirectory(model2Dir, SpineGlRenderer.SLOT_SECONDARY)
+                applyTransform(1)
+                renderer.setPremultipliedAlpha(pma2, SpineGlRenderer.SLOT_SECONDARY)
+                renderer.onResume()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        } else {
+            renderer.setModelDirectory(null, SpineGlRenderer.SLOT_SECONDARY)
+        }
     }
 
+    LaunchedEffect(scale, scale2) {
+        currentScale[0] = scale
+        currentScale[1] = scale2
+        applyTransform(0)
+        applyTransform(1)
+    }
+
+    // Reset size & position of the selected slot when resetTick changes (>0)
+    LaunchedEffect(resetTick) {
+        if (resetTick > 0) {
+            val slot = slotRef.intValue
+            currentScale[slot] = 1.0f
+            currentPosX[slot] = 0.0f
+            currentPosY[slot] = 0.0f
+            applyTransform(slot)
+            prefs.edit()
+                .putFloat(SpineModelLoader.SlotPrefs.scaleKey(slot), 1.0f)
+                .putFloat(SpineModelLoader.SlotPrefs.posXKey(slot), 0.0f)
+                .putFloat(SpineModelLoader.SlotPrefs.posYKey(slot), 0.0f)
+                .apply()
+            onScaleChange?.invoke(slot, 1.0f)
+        }
+    }
+
+    // PMA is independent per slot (primary / secondary models may need different modes)
     LaunchedEffect(pma) {
-        renderer.setPremultipliedAlpha(pma)
+        renderer.setPremultipliedAlpha(pma, SpineGlRenderer.SLOT_PRIMARY)
+    }
+
+    LaunchedEffect(pma2) {
+        renderer.setPremultipliedAlpha(pma2, SpineGlRenderer.SLOT_SECONDARY)
     }
 
     LaunchedEffect(activeAnimation) {
         if (!activeAnimation.isNullOrEmpty()) {
-            renderer.playAnimation(activeAnimation)
+            renderer.playAnimation(activeAnimation, true, SpineGlRenderer.SLOT_PRIMARY)
+        }
+    }
+
+    LaunchedEffect(activeAnimation2) {
+        if (!activeAnimation2.isNullOrEmpty()) {
+            renderer.playAnimation(activeAnimation2, true, SpineGlRenderer.SLOT_SECONDARY)
         }
     }
 
     LaunchedEffect(activeSkin) {
         if (!activeSkin.isNullOrEmpty()) {
-            renderer.setSkin(activeSkin)
+            renderer.setSkin(activeSkin, SpineGlRenderer.SLOT_PRIMARY)
+        }
+    }
+
+    LaunchedEffect(activeSkin2) {
+        if (!activeSkin2.isNullOrEmpty()) {
+            renderer.setSkin(activeSkin2, SpineGlRenderer.SLOT_SECONDARY)
         }
     }
 

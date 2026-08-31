@@ -10,7 +10,6 @@ import android.os.SystemClock
 import android.view.SurfaceHolder
 import com.badlogic.gdx.backends.android.AndroidGL20
 import com.badlogic.gdx.files.FileHandle
-import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.graphics.OrthographicCamera
 import com.badlogic.gdx.graphics.Texture
 import com.badlogic.gdx.graphics.g2d.PolygonSpriteBatch
@@ -23,31 +22,61 @@ import java.io.File
 /**
  * Robust OpenGL ES Renderer managing Spine Skeleton & AnimationState loops on SurfaceHolder with EGL14 context.
  * Implements SurfaceHolder.Callback to reliably recover OpenGL surface after returning from wallpaper settings or lock screen.
+ *
+ * Supports up to TWO simultaneous models (Live2DViewerEX style):
+ *  - Slot 0: primary model (drawn LAST, in FRONT / on top)
+ *  - Slot 1: secondary model (drawn first, behind)
+ * Each slot keeps its own adapter instance, atlas, transform (scale / offsetX / offsetY),
+ * PMA flag, animation and skin state.
  */
 class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.Callback {
+
+    companion object {
+        const val SLOT_PRIMARY = 0
+        const val SLOT_SECONDARY = 1
+        const val SLOT_COUNT = 2
+    }
+
+    /** Per-slot model state. Accessed only inside synchronized(this) blocks / render thread. */
+    private class SlotState {
+        var dir: File? = null
+        var isPending = false
+        var instance: com.spine.wallpaper.bridge.ISpineModelAdapter? = null
+        var atlas: TextureAtlas? = null
+        var scale = 1.0f
+        var posX = 0.0f
+        var posY = 0.0f
+        var isPma = true
+        var pendingAnimationName: String? = null
+        var pendingSkinName: String? = null
+
+        fun releaseSlot() {
+            try {
+                instance?.dispose()
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
+            try {
+                atlas?.dispose()
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
+            instance = null
+            atlas = null
+        }
+    }
 
     private var isRunning = false
     private var renderThread: Thread? = null
     private var hasValidSurface = false
 
-    private var modelDir: File? = null
-    private var isModelPending = false
-
-    private var modelInstance: com.spine.wallpaper.bridge.ISpineModelAdapter? = null
-    private var atlas: TextureAtlas? = null
-    private var config: Live2DConfig? = null
+    private val slots = Array(SLOT_COUNT) { SlotState() }
 
     private var batch: PolygonSpriteBatch? = null
     private var camera: OrthographicCamera? = null
 
-    private var scale = 1.0f
-    private var posX = 0.0f
-    private var posY = 0.0f
-    private var isPma = true
     private var animationIndex = 0
 
-    private var pendingAnimationName: String? = null
-    private var pendingSkinName: String? = null
     private var bgRed = 0.08f
     private var bgGreen = 0.09f
     private var bgBlue = 0.12f
@@ -62,7 +91,8 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
     private var eglConfig: EGLConfig? = null
 
-    var onModelLoadedListener: ((animations: List<String>, skins: List<String>) -> Unit)? = null
+    /** slot index -> (animations, skins) */
+    var onModelLoadedListener: ((slot: Int, animations: List<String>, skins: List<String>) -> Unit)? = null
 
     private var viewportWidth = 1080
     private var viewportHeight = 1920
@@ -80,7 +110,7 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     override fun surfaceCreated(holder: SurfaceHolder) {
         synchronized(this) {
             hasValidSurface = true
-            isModelPending = true
+            slots.forEach { it.isPending = true }
             val frame = holder.surfaceFrame
             if (frame != null && frame.width() > 0 && frame.height() > 0) {
                 viewportWidth = frame.width()
@@ -93,7 +123,7 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         synchronized(this) {
             hasValidSurface = true
-            isModelPending = true
+            slots.forEach { it.isPending = true }
             if (width > 0 && height > 0) {
                 viewportWidth = width
                 viewportHeight = height
@@ -107,37 +137,54 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         synchronized(this) {
             hasValidSurface = false
-            isModelPending = true
+            slots.forEach { it.isPending = true }
             destroyEglSurface()
         }
     }
 
-    fun setModelDirectory(dir: File) {
+    /**
+     * Sets the model directory for a slot. Pass null to clear (remove) the slot's model.
+     */
+    fun setModelDirectory(dir: File?, slot: Int = SLOT_PRIMARY) {
+        val s = slotAt(slot) ?: return
         synchronized(this) {
-            this.modelDir = dir
-            this.isModelPending = true
+            val changed = s.dir?.absolutePath != dir?.absolutePath
+            s.dir = dir
+            if (dir == null) {
+                // Explicit removal: drop instance immediately on GL thread next frame
+                s.isPending = true
+            } else if (changed || s.instance == null) {
+                s.isPending = true
+            }
         }
     }
 
-    fun setPremultipliedAlpha(pma: Boolean) {
+    /**
+     * Sets the premultiplied-alpha rendering flag for one slot.
+     * Each slot's PMA mode is independent (model textures differ between slots).
+     */
+    fun setPremultipliedAlpha(pma: Boolean, slot: Int = SLOT_PRIMARY) {
+        val s = slotAt(slot) ?: return
         synchronized(this) {
-            this.isPma = pma
-            this.modelInstance?.setPremultipliedAlpha(pma)
+            s.isPma = pma
+            s.instance?.setPremultipliedAlpha(pma)
         }
     }
 
-    fun updateTransform(scale: Float, x: Float, y: Float) {
+    fun updateTransform(scale: Float, x: Float, y: Float, slot: Int = SLOT_PRIMARY) {
+        val s = slotAt(slot) ?: return
         synchronized(this) {
-            this.scale = scale
-            this.posX = x
-            this.posY = y
+            s.scale = scale
+            s.posX = x
+            s.posY = y
         }
     }
 
-    fun playAnimation(animName: String, loop: Boolean = true) {
+    fun playAnimation(animName: String, loop: Boolean = true, slot: Int = SLOT_PRIMARY) {
+        val s = slotAt(slot) ?: return
         synchronized(this) {
-            val model = modelInstance ?: run {
-                pendingAnimationName = animName
+            val model = s.instance ?: run {
+                s.pendingAnimationName = animName
                 return
             }
             try {
@@ -148,10 +195,11 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
         }
     }
 
-    fun setSkin(skinName: String) {
+    fun setSkin(skinName: String, slot: Int = SLOT_PRIMARY) {
+        val s = slotAt(slot) ?: return
         synchronized(this) {
-            val model = modelInstance ?: run {
-                pendingSkinName = skinName
+            val model = s.instance ?: run {
+                s.pendingSkinName = skinName
                 return
             }
             try {
@@ -186,9 +234,15 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
         }
     }
 
+    /**
+     * Tap: cycles the animation of the model under the finger.
+     * Checks the front slot (primary, 0) first, then secondary.
+     */
     fun triggerTapAnimation(screenX: Float, screenY: Float) {
         synchronized(this) {
-            val model = modelInstance ?: return
+            val target = hitTestSlot(screenX, screenY)
+            val model = if (target >= 0) slots[target].instance else slots[SLOT_PRIMARY].instance ?: slots[SLOT_SECONDARY].instance
+            model ?: return
             val anims = model.animationNames
             if (anims.isEmpty()) return
 
@@ -198,9 +252,38 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
         }
     }
 
+    /**
+     * Returns the slot index whose rendered bounds contain the screen point, or -1 if none.
+     * Front slot (primary, 0) is checked first.
+     */
+    fun hitTestSlot(screenX: Float, screenY: Float): Int {
+        val frame = surfaceHolder.surfaceFrame
+        val width = if (frame != null && frame.width() > 0) frame.width().toFloat() else viewportWidth.toFloat()
+        val height = if (frame != null && frame.height() > 0) frame.height().toFloat() else viewportHeight.toFloat()
+        for (i in 0 until SLOT_COUNT) {
+            val s = slots[i]
+            val instance = s.instance ?: continue
+            val bounds = instance.bounds
+            if (bounds.size < 4) continue
+            val safeScale = if (s.scale > 0.001f) s.scale else 1.0f
+            // Model is centered at (width/2 + posX*width, height/2 + posY*height)
+            val centerX = width / 2.0f + s.posX * width
+            val centerY = height / 2.0f + s.posY * height
+            val halfW = bounds[2] * safeScale / 2.0f
+            val halfH = bounds[3] * safeScale / 2.0f
+            if (halfW <= 0f || halfH <= 0f) continue
+            if (screenX >= centerX - halfW && screenX <= centerX + halfW &&
+                screenY >= centerY - halfH && screenY <= centerY + halfH
+            ) {
+                return i
+            }
+        }
+        return -1
+    }
+
     fun onResume() {
         synchronized(this) {
-            isModelPending = true
+            slots.forEach { it.isPending = true }
             isBgTexturePending = true
             if (isRunning && renderThread?.isAlive == true) {
                 return
@@ -246,9 +329,12 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                 lastTime = now
 
                 synchronized(this) {
-                    if (isModelPending && modelDir != null) {
-                        loadModelOnGlThread(modelDir!!)
-                        isModelPending = false
+                    for (i in 0 until SLOT_COUNT) {
+                        val s = slots[i]
+                        if (s.isPending) {
+                            loadModelOnGlThread(s, i)
+                            s.isPending = false
+                        }
                     }
 
                     renderFrame(deltaSeconds)
@@ -281,7 +367,7 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     fun onPause() {
         synchronized(this) {
             isRunning = false
-            isModelPending = true
+            slots.forEach { it.isPending = true }
         }
         try {
             renderThread?.join(500)
@@ -291,9 +377,15 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
         renderThread = null
     }
 
-    private fun loadModelOnGlThread(dir: File) {
+    private fun slotAt(slot: Int): SlotState? {
+        return if (slot in 0 until SLOT_COUNT) slots[slot] else null
+    }
+
+    private fun loadModelOnGlThread(s: SlotState, slotIndex: Int) {
         try {
-            releaseGL()
+            s.releaseSlot()
+
+            val dir = s.dir ?: return
 
             var skelFile: File? = null
             var atlasFile: File? = null
@@ -332,7 +424,7 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
 
             if (skelFile == null || atlasFile == null) return
 
-            config = configFile?.let { Live2DConfig.parse(it.readText()) }
+            val config = configFile?.let { Live2DConfig.parse(it.readText()) }
 
             val atlasHandle = com.spine.wallpaper.bridge.AtlasSanitizer.sanitize(atlasFile)
             val loadedAtlas: TextureAtlas = try {
@@ -346,16 +438,16 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                     TextureAtlas()
                 }
             }
-            this.atlas = loadedAtlas
+            s.atlas = loadedAtlas
 
             // Create Multi-Version Model Adapter via Multi-Runtime Dispatcher
             val instance = com.spine.wallpaper.bridge.SpineMultiRuntimeManager.createModelAdapter(
                 skelFile = skelFile,
                 atlas = loadedAtlas,
                 scale = config?.scale ?: 1.0f,
-                isPma = isPma
+                isPma = s.isPma
             )
-            this.modelInstance = instance
+            s.instance = instance
 
             val animNames = instance.animationNames
             val skinNames = instance.skinNames
@@ -374,7 +466,7 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                 } catch (_: Exception) {}
             }
 
-            val targetSkin = pendingSkinName?.takeIf { skinNames.contains(it) }
+            val targetSkin = s.pendingSkinName?.takeIf { skinNames.contains(it) }
                 ?: skinNames.firstOrNull { it.equals("default", ignoreCase = true) }
                 ?: skinNames.firstOrNull()
             if (targetSkin != null) {
@@ -382,19 +474,23 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                     instance.setSkin(targetSkin)
                 } catch (_: Exception) {}
             }
-            pendingSkinName = null
+            s.pendingSkinName = null
 
-            if (!pendingAnimationName.isNullOrEmpty() && animNames.contains(pendingAnimationName)) {
+            if (!s.pendingAnimationName.isNullOrEmpty() && animNames.contains(s.pendingAnimationName)) {
                 try {
-                    instance.setAnimation(0, pendingAnimationName!!, true)
+                    instance.setAnimation(0, s.pendingAnimationName!!, true)
                 } catch (_: Exception) {}
-                pendingAnimationName = null
+                s.pendingAnimationName = null
             }
 
-            batch = PolygonSpriteBatch()
-            camera = OrthographicCamera()
+            if (batch == null) {
+                batch = PolygonSpriteBatch()
+            }
+            if (camera == null) {
+                camera = OrthographicCamera()
+            }
 
-            onModelLoadedListener?.invoke(animNames, skinNames)
+            onModelLoadedListener?.invoke(slotIndex, animNames, skinNames)
 
         } catch (e: Throwable) {
             e.printStackTrace()
@@ -449,21 +545,34 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
         pBatch.projectionMatrix = cam.combined
         pBatch.begin()
 
-        // 1. Draw custom background texture covering the entire viewport if loaded
+        // 1. Draw custom background texture: keep original aspect ratio
+        //    (scale to cover the viewport, centered; no stretching)
         val bg = bgTexture
         if (bg != null) {
-            pBatch.draw(bg, 0f, 0f, width.toFloat(), height.toFloat())
+            val imgW = bg.width.toFloat()
+            val imgH = bg.height.toFloat()
+            if (imgW > 0f && imgH > 0f) {
+                val coverScale = maxOf(width / imgW, height / imgH)
+                val drawW = imgW * coverScale
+                val drawH = imgH * coverScale
+                val drawX = (width - drawW) / 2f
+                val drawY = (height - drawH) / 2f
+                pBatch.draw(bg, drawX, drawY, drawW, drawH)
+            } else {
+                pBatch.draw(bg, 0f, 0f, width.toFloat(), height.toFloat())
+            }
         }
 
-        // 2. Draw Spine model (Multi-runtime isolated adapter)
-        val model = modelInstance
-        if (model != null) {
-            model.setPremultipliedAlpha(isPma)
+        // 2. Draw Spine models: slot 1 (secondary) first = behind, slot 0 (primary) LAST = on top
+        for (i in SLOT_COUNT - 1 downTo 0) {
+            val s = slots[i]
+            val model = s.instance ?: continue
+            model.setPremultipliedAlpha(s.isPma)
             model.update(delta)
 
-            val safeScale = if (scale > 0.001f) scale else 1.0f
-            val centerX = width / 2.0f + posX * width
-            val centerY = height / 2.0f + posY * height
+            val safeScale = if (s.scale > 0.001f) s.scale else 1.0f
+            val centerX = width / 2.0f + s.posX * width
+            val centerY = height / 2.0f + s.posY * height
             model.setTransform(safeScale, centerX, centerY)
 
             model.render(pBatch)
@@ -555,15 +664,12 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
         try {
             bgTexture?.dispose()
             batch?.dispose()
-            atlas?.dispose()
-            modelInstance?.dispose()
+            slots.forEach { it.releaseSlot() }
         } catch (e: Throwable) {
             e.printStackTrace()
         }
         bgTexture = null
         batch = null
-        atlas = null
-        modelInstance = null
         camera = null
     }
 
