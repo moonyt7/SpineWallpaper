@@ -46,6 +46,8 @@ fun SpineViewCompose(
     bgColor: Color = Color(0xFF0F172A),
     bgImagePath: String? = null,
     resetTick: Int = 0,
+    tapAnimEnabled: Boolean = true,
+    targetFps: Int = 60,
     onScaleChange: ((slot: Int, scale: Float) -> Unit)? = null,
     onModelLoaded: ((slot: Int, animations: List<String>, skins: List<String>) -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -82,6 +84,9 @@ fun SpineViewCompose(
     // Gesture target slot (kept in a state so detector closures see fresh value)
     val slotRef = remember { mutableIntStateOf(selectedSlot) }
 
+    // Tap-to-switch-animation toggle (kept in a state so the gesture closure sees fresh value)
+    val tapEnabledRef = remember { mutableStateOf(tapAnimEnabled) }
+
     fun applyTransform(slot: Int) {
         renderer.updateTransform(currentScale[slot], currentPosX[slot], currentPosY[slot], slot)
     }
@@ -115,7 +120,9 @@ fun SpineViewCompose(
             }
 
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                renderer.triggerTapAnimation(e.x, e.y)
+                if (tapEnabledRef.value) {
+                    renderer.triggerTapAnimation(e.x, e.y)
+                }
                 return true
             }
         })
@@ -129,6 +136,14 @@ fun SpineViewCompose(
 
     LaunchedEffect(selectedSlot) {
         slotRef.intValue = selectedSlot
+    }
+
+    LaunchedEffect(tapAnimEnabled) {
+        tapEnabledRef.value = tapAnimEnabled
+    }
+
+    LaunchedEffect(targetFps) {
+        renderer.setTargetFps(targetFps)
     }
 
     LaunchedEffect(modelDir) {

@@ -41,6 +41,10 @@ class SpineWallpaperService : WallpaperService() {
         private val offsetX = FloatArray(2) { 0.0f }
         private val offsetY = FloatArray(2) { 0.0f }
 
+        // System settings (kept in fields so the gesture callback sees fresh values)
+        @Volatile private var tapAnimEnabled = true
+        @Volatile private var targetFps = 60
+
         private fun prefs(): SharedPreferences =
             applicationContext.getSharedPreferences("spine_wallpaper_prefs", MODE_PRIVATE)
 
@@ -69,6 +73,11 @@ class SpineWallpaperService : WallpaperService() {
             // Per-slot PMA (independent for primary / secondary models)
             spineRenderer?.setPremultipliedAlpha(prefs.getBoolean("pma_enabled", true), SpineGlRenderer.SLOT_PRIMARY)
             spineRenderer?.setPremultipliedAlpha(prefs.getBoolean("pma2_enabled", true), SpineGlRenderer.SLOT_SECONDARY)
+
+            // System settings: tap-to-switch-animation & frame rate limit
+            tapAnimEnabled = prefs.getBoolean("tap_switch_animation", true)
+            targetFps = prefs.getInt("target_fps", 60)
+            spineRenderer?.setTargetFps(targetFps)
 
             // Read background color and image
             val bgColorInt = prefs.getInt("bg_color", 0xFF0F172A.toInt())
@@ -116,7 +125,9 @@ class SpineWallpaperService : WallpaperService() {
                     }
 
                     override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                        spineRenderer?.triggerTapAnimation(e.x, e.y)
+                        if (tapAnimEnabled) {
+                            spineRenderer?.triggerTapAnimation(e.x, e.y)
+                        }
                         return true
                     }
                 })
@@ -259,6 +270,13 @@ class SpineWallpaperService : WallpaperService() {
                     val slot = if (key == "pma2_enabled") 1 else 0
                     val isPma = prefs?.getBoolean(key, true) ?: true
                     spineRenderer?.setPremultipliedAlpha(isPma, slot)
+                }
+                "tap_switch_animation" -> {
+                    tapAnimEnabled = prefs?.getBoolean("tap_switch_animation", true) ?: true
+                }
+                "target_fps" -> {
+                    targetFps = prefs?.getInt("target_fps", 60) ?: 60
+                    spineRenderer?.setTargetFps(targetFps)
                 }
                 "model_scale", "model2_scale" -> {
                     val slot = if (key == "model2_scale") 1 else 0

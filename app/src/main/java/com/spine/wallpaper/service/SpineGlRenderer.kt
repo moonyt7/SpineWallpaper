@@ -70,6 +70,9 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     private var renderThread: Thread? = null
     private var hasValidSurface = false
 
+    /** Target frame rate limit (FPS). 15..120, default 60. */
+    @Volatile private var targetFps = 60
+
     private val slots = Array(SLOT_COUNT) { SlotState() }
 
     private var batch: PolygonSpriteBatch? = null
@@ -235,6 +238,14 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     }
 
     /**
+     * Sets the frame rate limit for the render loop (frames per second).
+     * The loop sleeps for the remainder of each frame budget after rendering.
+     */
+    fun setTargetFps(fps: Int) {
+        targetFps = fps.coerceIn(15, 120)
+    }
+
+    /**
      * Tap: cycles the animation of the model under the finger.
      * Checks the front slot (primary, 0) first, then secondary.
      */
@@ -324,7 +335,8 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                     }
                 }
 
-                val now = SystemClock.uptimeMillis()
+                val frameStartMs = SystemClock.uptimeMillis()
+                val now = frameStartMs
                 val deltaSeconds = ((now - lastTime) / 1000.0f).coerceIn(0.001f, 0.1f)
                 lastTime = now
 
@@ -349,8 +361,12 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                     }
                 }
 
+                // Frame pacing: sleep for the remainder of the frame budget (targetFps)
                 try {
-                    Thread.sleep(16) // ~60 FPS
+                    val frameBudgetMs = 1000.0 / targetFps
+                    val elapsedMs = (SystemClock.uptimeMillis() - frameStartMs).toDouble()
+                    val sleepMs = (frameBudgetMs - elapsedMs).toLong().coerceAtLeast(1L)
+                    Thread.sleep(sleepMs)
                 } catch (e: InterruptedException) {
                     break
                 }

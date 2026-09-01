@@ -50,6 +50,70 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
+/**
+ * Theme-aware UI palette shared by the drawer / bottom bar / dialogs.
+ * drawerBg has 60% alpha, bottomBarBg has 30% alpha (see requirements).
+ */
+private data class UiPalette(
+    val drawerBg: Color,      // sidebar container (60% opaque)
+    val bottomBarBg: Color,   // bottom control strip (30% opaque)
+    val card: Color,
+    val cardActive: Color,
+    val cardSelected: Color,
+    val chip: Color,
+    val chipDisabled: Color,
+    val divider: Color,
+    val text: Color,
+    val textSecondary: Color,
+    val textMuted: Color,
+    val accent: Color,
+    val accentSoft: Color,
+    val border: Color,
+    val importBtn: Color,
+    val wallpaperBtn: Color,
+    val dialogBg: Color
+)
+
+private val DarkUiPalette = UiPalette(
+    drawerBg = Color(0x990F172A),
+    bottomBarBg = Color(0x4D1E293B),
+    card = Color(0xFF1E293B),
+    cardActive = Color(0xFF312E81),
+    cardSelected = Color(0xFF4338CA),
+    chip = Color(0xB3334155),
+    chipDisabled = Color(0x66334155),
+    divider = Color(0xFF334155),
+    text = Color.White,
+    textSecondary = Color(0xFFCBD5E1),
+    textMuted = Color.Gray,
+    accent = Color(0xFF6366F1),
+    accentSoft = Color(0xFF818CF8),
+    border = Color(0xFF475569),
+    importBtn = Color(0xFF4F46E5),
+    wallpaperBtn = Color(0xFF10B981),
+    dialogBg = Color(0xFF0F172A)
+)
+
+private val LightUiPalette = UiPalette(
+    drawerBg = Color(0x99FFFFFF),
+    bottomBarBg = Color(0x4DF1F5F9),
+    card = Color(0xFFF1F5F9),
+    cardActive = Color(0xFFE0E7FF),
+    cardSelected = Color(0xFF6366F1),
+    chip = Color(0xB3CBD5E1),
+    chipDisabled = Color(0x66CBD5E1),
+    divider = Color(0xFFCBD5E1),
+    text = Color(0xFF1E293B),
+    textSecondary = Color(0xFF475569),
+    textMuted = Color(0xFF64748B),
+    accent = Color(0xFF4F46E5),
+    accentSoft = Color(0xFF4338CA),
+    border = Color(0xFFCBD5E1),
+    importBtn = Color(0xFF4F46E5),
+    wallpaperBtn = Color(0xFF10B981),
+    dialogBg = Color(0xFFFFFFFF)
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         // Safeguard intent and bundle extras to prevent MIUI SuggestManager / ActivityThread deliverResultsIfNeeded NPE
@@ -66,14 +130,23 @@ class MainActivity : ComponentActivity() {
             e.printStackTrace()
         }
         setContent {
+            val themePrefs = remember { getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE) }
+            var isDarkTheme by remember { mutableStateOf(themePrefs.getString("theme_mode", "dark") != "light") }
             MaterialTheme(
-                colorScheme = darkColorScheme(
+                colorScheme = if (isDarkTheme) darkColorScheme(
                     primary = Color(0xFF6366F1),
                     background = Color(0xFF0F172A),
                     surface = Color(0xFF1E293B)
+                ) else lightColorScheme(
+                    primary = Color(0xFF4F46E5),
+                    background = Color(0xFFF8FAFC),
+                    surface = Color(0xFFE2E8F0)
                 )
             ) {
-                SpineWallpaperApp()
+                SpineWallpaperApp(
+                    isDarkTheme = isDarkTheme,
+                    onThemeChange = { dark -> isDarkTheme = dark }
+                )
             }
         }
     }
@@ -91,11 +164,15 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SpineWallpaperApp() {
+fun SpineWallpaperApp(
+    isDarkTheme: Boolean = true,
+    onThemeChange: (Boolean) -> Unit = {}
+) {
     val context = LocalContext.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE) }
+    val palette = if (isDarkTheme) DarkUiPalette else LightUiPalette
 
     var savedModels by remember { mutableStateOf<List<SpineModelItem>>(emptyList()) }
     var activeModelId by remember { mutableStateOf<String?>(null) }
@@ -124,6 +201,10 @@ fun SpineWallpaperApp() {
     var isPma by remember { mutableStateOf(prefs.getBoolean("pma_enabled", true)) }
     var isPma2 by remember { mutableStateOf(prefs.getBoolean("pma2_enabled", true)) }
 
+    // 系统设置
+    var tapAnimEnabled by remember { mutableStateOf(prefs.getBoolean("tap_switch_animation", true)) }
+    var targetFps by remember { mutableStateOf(prefs.getInt("target_fps", 60)) }
+
     val savedColorInt = remember { prefs.getInt("bg_color", 0xFF0F172A.toInt()) }
     var selectedBgColor by remember { mutableStateOf(Color(savedColorInt)) }
     var customBgPath by remember { mutableStateOf(prefs.getString("bg_image_path", null)) }
@@ -135,6 +216,7 @@ fun SpineWallpaperApp() {
     var isModelsExpanded by remember { mutableStateOf(true) }
     var isAnimationsExpanded by remember { mutableStateOf(true) }
     var isSkinsExpanded by remember { mutableStateOf(true) }
+    var isSettingsExpanded by remember { mutableStateOf(true) }
 
     fun refreshModelsList() {
         val models = SpineModelLoader.getSavedModels(context)
@@ -228,6 +310,16 @@ fun SpineWallpaperApp() {
         Toast.makeText(context, "已删除该模型", Toast.LENGTH_SHORT).show()
     }
 
+    fun setAsWallpaper() {
+        val intent = Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).apply {
+            putExtra(
+                WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
+                ComponentName(context, SpineWallpaperService::class.java)
+            )
+        }
+        context.startActivity(intent)
+    }
+
     val zipPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -283,7 +375,7 @@ fun SpineWallpaperApp() {
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(
-                drawerContainerColor = Color(0xFF0F172A),
+                drawerContainerColor = palette.drawerBg,
                 modifier = Modifier.width(320.dp)
             ) {
                 Column(
@@ -302,7 +394,7 @@ fun SpineWallpaperApp() {
                             modifier = Modifier
                                 .size(44.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF6366F1)),
+                                .background(palette.accent),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -316,13 +408,13 @@ fun SpineWallpaperApp() {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 "Spine 2D 工坊",
-                                color = Color.White,
+                                color = palette.text,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
                                 "全版本多模型支持引擎 (3.6~4.2)",
-                                color = Color(0xFFA5B4FC),
+                                color = palette.accentSoft,
                                 fontSize = 11.sp
                             )
                         }
@@ -330,19 +422,19 @@ fun SpineWallpaperApp() {
                             Icon(
                                 Icons.Default.Info,
                                 contentDescription = "版本兼容说明",
-                                tint = Color(0xFF818CF8),
+                                tint = palette.accentSoft,
                                 modifier = Modifier.size(22.dp)
                             )
                         }
                     }
 
-                    Divider(color = Color(0xFF334155), thickness = 1.dp)
+                    Divider(color = palette.divider, thickness = 1.dp)
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Import Button
                     Button(
                         onClick = { zipPicker.launch(arrayOf("application/zip", "*/*")) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.importBtn),
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)
                     ) {
@@ -379,14 +471,14 @@ fun SpineWallpaperApp() {
                             ) {
                                 Text(
                                     "📁 我的模型库 (${savedModels.size})",
-                                    color = Color(0xFF818CF8),
+                                    color = palette.accentSoft,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Icon(
                                     if (isModelsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                                     contentDescription = "折叠/展开",
-                                    tint = Color(0xFF818CF8),
+                                    tint = palette.accentSoft,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -395,13 +487,13 @@ fun SpineWallpaperApp() {
                             if (isModelsExpanded) {
                                 if (savedModels.isEmpty()) {
                                     Surface(
-                                        color = Color(0xFF1E293B),
+                                        color = palette.card,
                                         shape = RoundedCornerShape(12.dp),
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
                                             "暂未保存任何 Spine 模型。\n支持导入 Spine 3.6 / 3.7 / 3.8 / 4.0 / 4.1 / 4.2 的 .zip 压缩包！",
-                                            color = Color.Gray,
+                                            color = palette.textMuted,
                                             fontSize = 12.sp,
                                             modifier = Modifier.padding(14.dp)
                                         )
@@ -422,9 +514,9 @@ fun SpineWallpaperApp() {
                                             }
 
                                             Surface(
-                                                color = if (isActive) Color(0xFF312E81) else Color(0xFF1E293B),
+                                                color = if (isActive) palette.cardActive else palette.card,
                                                 shape = RoundedCornerShape(12.dp),
-                                                border = if (isActive) androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF6366F1)) else null,
+                                                border = if (isActive) androidx.compose.foundation.BorderStroke(1.dp, palette.accent) else null,
                                                 modifier = Modifier
                                                     .fillMaxWidth()
                                                     .clickable { selectModel(item.id) }
@@ -437,7 +529,7 @@ fun SpineWallpaperApp() {
                                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                                             Text(
                                                                 item.name,
-                                                                color = Color.White,
+                                                                color = palette.text,
                                                                 fontWeight = FontWeight.Medium,
                                                                 fontSize = 14.sp,
                                                                 maxLines = 1,
@@ -461,12 +553,12 @@ fun SpineWallpaperApp() {
                                                             Spacer(modifier = Modifier.width(4.dp))
                                                             // Format Tag (.skel / JSON)
                                                             Surface(
-                                                                color = Color(0xFF334155),
+                                                                color = palette.divider,
                                                                 shape = RoundedCornerShape(4.dp)
                                                             ) {
                                                                 Text(
                                                                     item.format,
-                                                                    color = Color(0xFF94A3B8),
+                                                                    color = palette.textSecondary,
                                                                     fontSize = 9.sp,
                                                                     modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
                                                                 )
@@ -503,7 +595,7 @@ fun SpineWallpaperApp() {
                                                         Spacer(modifier = Modifier.height(4.dp))
                                                         Text(
                                                             "动作: ${item.animations.size} 个 | 皮肤: ${item.skins.size} 个",
-                                                            color = Color.Gray,
+                                                            color = palette.textMuted,
                                                             fontSize = 11.sp
                                                         )
                                                     }
@@ -516,7 +608,7 @@ fun SpineWallpaperApp() {
                                                         Icon(
                                                             if (isSecond) Icons.Default.Cancel else Icons.Default.GroupAdd,
                                                             contentDescription = if (isSecond) "移除副模型" else "设为副模型",
-                                                            tint = if (isSecond) Color(0xFFF59E0B) else Color(0xFF818CF8),
+                                                            tint = if (isSecond) Color(0xFFF59E0B) else palette.accentSoft,
                                                             modifier = Modifier.size(18.dp)
                                                         )
                                                     }
@@ -561,13 +653,13 @@ fun SpineWallpaperApp() {
                                 Column {
                                     Text(
                                         "🎬 动作列表 (${slotAnims.size}) · $slotLabel",
-                                        color = Color(0xFF818CF8),
+                                        color = palette.accentSoft,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
                                         targetModelName,
-                                        color = Color.Gray,
+                                        color = palette.textMuted,
                                         fontSize = 10.sp,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
@@ -576,7 +668,7 @@ fun SpineWallpaperApp() {
                                 Icon(
                                     if (isAnimationsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                                     contentDescription = "折叠/展开",
-                                    tint = Color(0xFF818CF8),
+                                    tint = palette.accentSoft,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -584,13 +676,13 @@ fun SpineWallpaperApp() {
 
                             if (isAnimationsExpanded) {
                                 if (slotAnims.isEmpty()) {
-                                    Text("模型中未检测到动作列表", color = Color.Gray, fontSize = 12.sp)
+                                    Text("模型中未检测到动作列表", color = palette.textMuted, fontSize = 12.sp)
                                 } else {
                                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         slotAnims.forEach { anim ->
                                             val isSelected = anim == slotCurAnim
                                             Surface(
-                                                color = if (isSelected) Color(0xFF4338CA) else Color(0xFF1E293B),
+                                                color = if (isSelected) palette.cardSelected else palette.card,
                                                 shape = RoundedCornerShape(8.dp),
                                                 modifier = Modifier
                                                     .fillMaxWidth()
@@ -613,13 +705,13 @@ fun SpineWallpaperApp() {
                                                     Icon(
                                                         if (isSelected) Icons.Default.PlayArrow else Icons.Default.Movie,
                                                         contentDescription = null,
-                                                        tint = if (isSelected) Color.White else Color.Gray,
+                                                        tint = if (isSelected) Color.White else palette.textMuted,
                                                         modifier = Modifier.size(16.dp)
                                                     )
                                                     Spacer(modifier = Modifier.width(8.dp))
                                                     Text(
                                                         anim,
-                                                        color = if (isSelected) Color.White else Color(0xFFCBD5E1),
+                                                        color = if (isSelected) Color.White else palette.textSecondary,
                                                         fontSize = 13.sp,
                                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                                                     )
@@ -646,14 +738,14 @@ fun SpineWallpaperApp() {
                                 ) {
                                     Text(
                                         "👗 皮肤部件 (${slotSkins.size})" + if (selectedSlot == 1) " · 副模型" else "",
-                                        color = Color(0xFF818CF8),
+                                        color = palette.accentSoft,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Icon(
                                         if (isSkinsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                                         contentDescription = "折叠/展开",
-                                        tint = Color(0xFF818CF8),
+                                        tint = palette.accentSoft,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -688,7 +780,7 @@ fun SpineWallpaperApp() {
                         item {
                             Text(
                                 "⚙️ 渲染与壁纸配置",
-                                color = Color(0xFF818CF8),
+                                color = palette.accentSoft,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -699,14 +791,14 @@ fun SpineWallpaperApp() {
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0xFF1E293B))
+                                    .background(palette.card)
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text("PMA 预乘 Alpha · 模型1", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                                    Text("开启可消除纹理半透明边缘白边/黑边", color = Color.Gray, fontSize = 11.sp)
+                                    Text("PMA 预乘 Alpha · 模型1", color = palette.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("开启可消除纹理半透明边缘白边/黑边", color = palette.textMuted, fontSize = 11.sp)
                                 }
                                 Switch(
                                     checked = isPma,
@@ -716,7 +808,7 @@ fun SpineWallpaperApp() {
                                     },
                                     colors = SwitchDefaults.colors(
                                         checkedThumbColor = Color.White,
-                                        checkedTrackColor = Color(0xFF6366F1)
+                                        checkedTrackColor = palette.accent
                                     )
                                 )
                             }
@@ -728,14 +820,14 @@ fun SpineWallpaperApp() {
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0xFF1E293B))
+                                    .background(palette.card)
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text("PMA 预乘 Alpha · 模型2", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                                    Text("副模型独立开关，与模型1互不影响", color = Color.Gray, fontSize = 11.sp)
+                                    Text("PMA 预乘 Alpha · 模型2", color = palette.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("副模型独立开关，与模型1互不影响", color = palette.textMuted, fontSize = 11.sp)
                                 }
                                 Switch(
                                     checked = isPma2,
@@ -752,10 +844,10 @@ fun SpineWallpaperApp() {
 
                             Spacer(modifier = Modifier.height(14.dp))
 
-                            // Background Color & Image Selector
+                            // Background Color & Image Selector + Set-as-Wallpaper
                             Text(
                                 "🎨 背景颜色与壁纸图片",
-                                color = Color(0xFF818CF8),
+                                color = palette.accentSoft,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -787,7 +879,7 @@ fun SpineWallpaperApp() {
                                         .background(selectedBgColor)
                                         .border(
                                             width = if (colorModeActive) 2.dp else 1.dp,
-                                            color = if (colorModeActive) Color(0xFF6366F1) else Color(0xFF475569),
+                                            color = if (colorModeActive) palette.accent else palette.border,
                                             shape = CircleShape
                                         )
                                         .clickable { showColorPicker = true },
@@ -806,10 +898,10 @@ fun SpineWallpaperApp() {
                                     modifier = Modifier
                                         .size(40.dp)
                                         .clip(CircleShape)
-                                        .background(if (customBgPath != null) Color(0xFF4338CA) else Color(0xFF334155))
+                                        .background(if (customBgPath != null) palette.accent else palette.chip)
                                         .border(
                                             width = if (customBgPath != null) 2.dp else 1.dp,
-                                            color = if (customBgPath != null) Color(0xFF818CF8) else Color(0xFF64748B),
+                                            color = if (customBgPath != null) palette.accentSoft else palette.border,
                                             shape = CircleShape
                                         )
                                         .clickable {
@@ -824,6 +916,23 @@ fun SpineWallpaperApp() {
                                         modifier = Modifier.size(22.dp)
                                     )
                                 }
+
+                                // 设为壁纸按钮（从原顶部栏迁移至此，紧邻背景图片按钮）
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(CircleShape)
+                                        .background(palette.wallpaperBtn)
+                                        .clickable { setAsWallpaper() },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.Wallpaper,
+                                        contentDescription = "设为壁纸",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
                             }
 
                             // Show custom background info if chosen
@@ -833,7 +942,7 @@ fun SpineWallpaperApp() {
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF1E293B))
+                                        .background(palette.card)
                                         .padding(horizontal = 10.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
@@ -842,13 +951,13 @@ fun SpineWallpaperApp() {
                                         Icon(
                                             Icons.Default.PhotoLibrary,
                                             contentDescription = null,
-                                            tint = Color(0xFF818CF8),
+                                            tint = palette.accentSoft,
                                             modifier = Modifier.size(16.dp)
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
                                             "已应用自定义背景图",
-                                            color = Color.White,
+                                            color = palette.text,
                                             fontSize = 12.sp
                                         )
                                     }
@@ -865,92 +974,145 @@ fun SpineWallpaperApp() {
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-    ) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "打开侧边栏", tint = Color.White)
-                        }
-                    },
-                    title = {
-                        Column {
-                            Text(
-                                "Spine 动态壁纸",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
-                            )
-                            val activeItem = savedModels.firstOrNull { it.id == activeModelId }
-                            val secondItem = savedModels.firstOrNull { it.id == model2Id }
-                            if (activeItem != null) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        "主: ${activeItem.name}",
-                                        fontSize = 11.sp,
-                                        color = Color(0xFF818CF8)
-                                    )
-                                    if (secondItem != null) {
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            "副: ${secondItem.name}",
-                                            fontSize = 11.sp,
-                                            color = Color(0xFFF59E0B)
+
+                        // Section 5: System Settings (点击切换动画 / 帧率限制 / 主题)
+                        item {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { isSettingsExpanded = !isSettingsExpanded }
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "🛠️ 系统设置",
+                                    color = palette.accentSoft,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Icon(
+                                    if (isSettingsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                    contentDescription = "折叠/展开",
+                                    tint = palette.accentSoft,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            if (isSettingsExpanded) {
+                                // 1) 点击切换动画（开关）
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(palette.card)
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("点击切换动画", color = palette.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                        Text("开启后：点击模型切换到下一个动作", color = palette.textMuted, fontSize = 11.sp)
+                                    }
+                                    Switch(
+                                        checked = tapAnimEnabled,
+                                        onCheckedChange = { checked ->
+                                            tapAnimEnabled = checked
+                                            prefs.edit().putBoolean("tap_switch_animation", checked).apply()
+                                        },
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color.White,
+                                            checkedTrackColor = palette.accent
                                         )
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                // 2) 帧率限制
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(palette.card)
+                                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                                ) {
+                                    Text("帧率限制", color = palette.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("降低帧率可减少耗电与发热", color = palette.textMuted, fontSize = 11.sp)
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        listOf(30, 45, 60).forEach { fps ->
+                                            FilterChip(
+                                                selected = targetFps == fps,
+                                                onClick = {
+                                                    targetFps = fps
+                                                    prefs.edit().putInt("target_fps", fps).apply()
+                                                },
+                                                label = { Text("${fps} FPS", fontSize = 11.sp) },
+                                                colors = FilterChipDefaults.filterChipColors(
+                                                    containerColor = palette.chip,
+                                                    selectedContainerColor = palette.accent,
+                                                    labelColor = palette.text,
+                                                    selectedLabelColor = Color.White
+                                                )
+                                            )
+                                        }
                                     }
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    val topBadgeColor = when (activeItem.version) {
-                                        "3.8" -> Color(0xFF059669)
-                                        "4.1" -> Color(0xFF4F46E5)
-                                        "3.7" -> Color(0xFFD97706)
-                                        "3.6" -> Color(0xFFEA580C)
-                                        "4.0" -> Color(0xFF0891B2)
-                                        "4.2" -> Color(0xFF9333EA)
-                                        else -> Color(0xFF64748B)
-                                    }
-                                    Surface(
-                                        color = topBadgeColor,
-                                        shape = RoundedCornerShape(3.dp)
-                                    ) {
-                                        Text(
-                                            "v${activeItem.version}",
-                                            color = Color.White,
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier.padding(horizontal = 3.dp, vertical = 0.5.dp)
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                // 3) 主题（亮 / 暗）
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(palette.card)
+                                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                                ) {
+                                    Text("主题", color = palette.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("切换应用界面亮色 / 暗色风格", color = palette.textMuted, fontSize = 11.sp)
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        FilterChip(
+                                            selected = !isDarkTheme,
+                                            onClick = {
+                                                prefs.edit().putString("theme_mode", "light").apply()
+                                                onThemeChange(false)
+                                            },
+                                            label = { Text("☀️ 亮色", fontSize = 11.sp) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                containerColor = palette.chip,
+                                                selectedContainerColor = palette.accent,
+                                                labelColor = palette.text,
+                                                selectedLabelColor = Color.White
+                                            )
+                                        )
+                                        FilterChip(
+                                            selected = isDarkTheme,
+                                            onClick = {
+                                                prefs.edit().putString("theme_mode", "dark").apply()
+                                                onThemeChange(true)
+                                            },
+                                            label = { Text("🌙 暗色", fontSize = 11.sp) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                containerColor = palette.chip,
+                                                selectedContainerColor = palette.accent,
+                                                labelColor = palette.text,
+                                                selectedLabelColor = Color.White
+                                            )
                                         )
                                     }
                                 }
                             }
                         }
-                    },
-                    actions = {
-                        Button(
-                            onClick = {
-                                val intent = Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).apply {
-                                    putExtra(
-                                        WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
-                                        ComponentName(context, SpineWallpaperService::class.java)
-                                    )
-                                }
-                                context.startActivity(intent)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Icon(Icons.Default.Wallpaper, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("设为壁纸", fontSize = 13.sp)
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1E293B))
-                )
+                    }
+                }
             }
-        ) { paddingValues ->
+        }
+    ) {
+        Scaffold { paddingValues ->
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -974,6 +1136,8 @@ fun SpineWallpaperApp() {
                         bgColor = selectedBgColor,
                         bgImagePath = customBgPath,
                         resetTick = resetTick,
+                        tapAnimEnabled = tapAnimEnabled,
+                        targetFps = targetFps,
                         onScaleChange = { slot, newScale ->
                             if (slot == 1) scale2Value = newScale else scaleValue = newScale
                         },
@@ -997,25 +1161,25 @@ fun SpineWallpaperApp() {
                             imageVector = Icons.Default.FolderZip,
                             contentDescription = null,
                             modifier = Modifier.size(72.dp),
-                            tint = Color(0xFF818CF8)
+                            tint = palette.accentSoft
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
                             "尚未选择 Spine 2D 模型",
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Medium,
-                            color = Color.White
+                            color = palette.text
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            "点击左上角【☰】菜单展开侧边栏，导入并管理模型与动作",
+                            "点击底部【☰】菜单展开侧边栏，导入并管理模型与动作",
                             fontSize = 13.sp,
-                            color = Color.Gray
+                            color = palette.textMuted
                         )
                         Spacer(modifier = Modifier.height(20.dp))
                         Button(
                             onClick = { zipPicker.launch(arrayOf("application/zip", "*/*")) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5))
+                            colors = ButtonDefaults.buttonColors(containerColor = palette.importBtn)
                         ) {
                             Icon(Icons.Default.FileUpload, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
@@ -1024,9 +1188,9 @@ fun SpineWallpaperApp() {
                     }
                 }
 
-                // Bottom Floating Control Overlay Strip
+                // Bottom Floating Control Overlay Strip (30% opaque)
                 Surface(
-                    color = Color(0xDD1E293B),
+                    color = palette.bottomBarBg,
                     shape = RoundedCornerShape(20.dp),
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -1041,13 +1205,13 @@ fun SpineWallpaperApp() {
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                    Icon(Icons.Default.Menu, contentDescription = "菜单", tint = Color.White)
+                                    Icon(Icons.Default.Menu, contentDescription = "菜单", tint = palette.text)
                                 }
                                 IconButton(onClick = { isPlaying = !isPlaying }) {
                                     Icon(
                                         if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                         contentDescription = "播放/暂停",
-                                        tint = Color.White
+                                        tint = palette.text
                                     )
                                 }
                                 // 槽位切换：模型1（主）/ 模型2（副）
@@ -1056,9 +1220,9 @@ fun SpineWallpaperApp() {
                                     onClick = { selectSlot(0) },
                                     label = { Text("模型1", fontSize = 11.sp) },
                                     colors = FilterChipDefaults.filterChipColors(
-                                        containerColor = Color(0xFF334155),
-                                        selectedContainerColor = Color(0xFF6366F1),
-                                        labelColor = Color.White,
+                                        containerColor = palette.chip,
+                                        selectedContainerColor = palette.accent,
+                                        labelColor = palette.text,
                                         selectedLabelColor = Color.White
                                     )
                                 )
@@ -1068,9 +1232,9 @@ fun SpineWallpaperApp() {
                                     onClick = { selectSlot(1) },
                                     label = { Text("模型2", fontSize = 11.sp) },
                                     colors = FilterChipDefaults.filterChipColors(
-                                        containerColor = if (model2Id == null) Color(0xFF1E293B) else Color(0xFF334155),
+                                        containerColor = if (model2Id == null) palette.chipDisabled else palette.chip,
                                         selectedContainerColor = Color(0xFFF59E0B),
-                                        labelColor = Color.White,
+                                        labelColor = palette.text,
                                         selectedLabelColor = Color.White
                                     )
                                 )
@@ -1087,17 +1251,17 @@ fun SpineWallpaperApp() {
                                         Toast.LENGTH_SHORT
                                     ).show()
                                 },
-                                colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+                                colors = ButtonDefaults.textButtonColors(contentColor = palette.text),
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                             ) {
                                 Icon(
                                     Icons.Default.Refresh,
                                     contentDescription = "重置",
-                                    tint = Color.White,
+                                    tint = palette.text,
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("重置", color = Color.White, fontSize = 13.sp)
+                                Text("重置", color = palette.text, fontSize = 13.sp)
                             }
                         }
 
@@ -1125,8 +1289,8 @@ fun SpineWallpaperApp() {
                                         },
                                         label = { Text(anim, fontSize = 12.sp) },
                                         colors = SuggestionChipDefaults.suggestionChipColors(
-                                            containerColor = if (isSelected) Color(0xFF6366F1) else Color(0xFF334155),
-                                            labelColor = Color.White
+                                            containerColor = if (isSelected) palette.accent else palette.chip,
+                                            labelColor = if (isSelected) Color.White else palette.text
                                         )
                                     )
                                 }
@@ -1159,7 +1323,7 @@ fun SpineWallpaperApp() {
                 onDismissRequest = { showVersionInfoDialog = false },
                 confirmButton = {
                     TextButton(onClick = { showVersionInfoDialog = false }) {
-                        Text("我知道了", color = Color(0xFF818CF8), fontWeight = FontWeight.Bold)
+                        Text("我知道了", color = palette.accentSoft, fontWeight = FontWeight.Bold)
                     }
                 },
                 title = {
@@ -1167,18 +1331,18 @@ fun SpineWallpaperApp() {
                         Icon(
                             Icons.Default.Verified,
                             contentDescription = null,
-                            tint = Color(0xFF818CF8),
+                            tint = palette.accentSoft,
                             modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Spine 多版本兼容引擎", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 16.sp)
+                        Text("Spine 多版本兼容引擎", fontWeight = FontWeight.Bold, color = palette.text, fontSize = 16.sp)
                     }
                 },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(
                             "本应用内置了多版本运行时隔离引擎，支持自适应检测并加载主流 Spine 模型：",
-                            color = Color(0xFFCBD5E1),
+                            color = palette.textSecondary,
                             fontSize = 13.sp
                         )
 
@@ -1195,7 +1359,7 @@ fun SpineWallpaperApp() {
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF1E293B))
+                                    .background(palette.card)
                                     .padding(8.dp)
                             ) {
                                 Surface(
@@ -1213,7 +1377,7 @@ fun SpineWallpaperApp() {
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     desc,
-                                    color = Color(0xFFE2E8F0),
+                                    color = palette.text,
                                     fontSize = 11.sp,
                                     modifier = Modifier.weight(1f)
                                 )
@@ -1222,12 +1386,12 @@ fun SpineWallpaperApp() {
 
                         Text(
                             "💡 导入提示：直接将包含 .skel/.json、.atlas 和 .png 的 .zip 文件导入即可，系统会自动检测版本并调用对应隔离运行时模块。",
-                            color = Color(0xFF94A3B8),
+                            color = palette.textMuted,
                             fontSize = 11.sp
                         )
                     }
                 },
-                containerColor = Color(0xFF0F172A)
+                containerColor = palette.dialogBg
             )
         }
     }

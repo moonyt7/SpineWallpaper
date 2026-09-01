@@ -193,35 +193,35 @@ object SpineModelLoader {
 
         val importedItems = mutableListOf<SpineModelItem>()
 
-        for (skelFile in skelFiles) {
+        // 同一目录下同 basename 的 .skel/.skel.bytes/.json 视为同一模型，去重后仅导入一次（优先 .skel 二进制）
+        val groupedSkel = skelFiles.groupBy { file ->
+            val base = file.nameWithoutExtension.removeSuffix(".skel").removeSuffix(".json").lowercase()
+            (file.parentFile?.absolutePath ?: "") + "::" + base
+        }
+        val uniqueSkelFiles = groupedSkel.values.map { group ->
+            group.firstOrNull { f -> f.name.lowercase().endsWith(".skel") || f.name.lowercase().endsWith(".skel.bytes") } ?: group.first()
+        }
+
+        for (skelFile in uniqueSkelFiles) {
+            // 模型根目录：骨架文件直接位于压缩包根目录时，整个 staging 属于该模型；否则取其所在子目录
+            val modelRoot = if (skelFile.parentFile == stagingDir) stagingDir else (skelFile.parentFile ?: stagingDir)
+
             val modelId = UUID.randomUUID().toString()
             val targetDir = File(modelsRoot, modelId)
             targetDir.mkdirs()
 
-            val parentDir = skelFile.parentFile ?: stagingDir
             var rawName = skelFile.nameWithoutExtension.removeSuffix(".skel").removeSuffix(".json")
             if (rawName.equals("skeleton", ignoreCase = true) || rawName.equals("spine", ignoreCase = true) || rawName.equals("data", ignoreCase = true)) {
-                if (parentDir != stagingDir && parentDir.name.isNotEmpty()) {
-                    rawName = parentDir.name
+                if (modelRoot != stagingDir && modelRoot.name.isNotEmpty()) {
+                    rawName = modelRoot.name
                 }
             }
             val modelName = if (rawName.isEmpty()) "Spine Model" else rawName
 
-            if (parentDir != stagingDir) {
-                parentDir.copyRecursively(targetDir, overwrite = true)
-            } else {
-                stagingDir.copyRecursively(targetDir, overwrite = true)
-            }
+            // 保留目录结构复制模型根目录，不做平铺镜像，避免重复占用存储
+            modelRoot.copyRecursively(targetDir, overwrite = true)
 
-            // Also mirror any nested image/texture files from stagingDir to targetDir to prevent subfolder path resolution errors
-            stagingDir.walkTopDown().filter { it.isFile }.forEach { f ->
-                val flatTarget = File(targetDir, f.name)
-                if (!flatTarget.exists()) {
-                    try { f.copyTo(flatTarget, overwrite = true) } catch (_: Exception) {}
-                }
-            }
-
-            val relativePath = skelFile.relativeTo(if (parentDir != stagingDir) parentDir else stagingDir).path
+            val relativePath = skelFile.relativeTo(modelRoot).path
             val targetSkelFile = File(targetDir, relativePath)
             val finalSkelFile = if (targetSkelFile.exists()) targetSkelFile else skelFile
 
@@ -230,9 +230,11 @@ object SpineModelLoader {
             val detectedFmt = SpineVersionDetector.detectFormat(finalSkelFile)
 
             val base = skelFile.nameWithoutExtension.removeSuffix(".skel").removeSuffix(".json")
-            val matchedAtlas = allFiles.firstOrNull { 
-                it.name.startsWith(base, ignoreCase = true) && (it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt")) 
-            } ?: allFiles.firstOrNull { it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt") }
+            val modelRootFiles = modelRoot.walkTopDown().filter { it.isFile }.toList()
+            val matchedAtlas = modelRootFiles.firstOrNull {
+                it.name.startsWith(base, ignoreCase = true) && (it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt"))
+            } ?: modelRootFiles.firstOrNull { it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt") }
+                ?: allFiles.firstOrNull { it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt") }
 
             val (anims, skins) = SpineVersionDetector.peekAnimationsAndSkins(finalSkelFile, matchedAtlas)
 
@@ -254,7 +256,11 @@ object SpineModelLoader {
                     put("format", detectedFmt)
                     put("skelFile", relativePath)
                     if (matchedAtlas != null) {
-                        val atlasRel = matchedAtlas.relativeTo(if (parentDir != stagingDir) parentDir else stagingDir).path
+                        val atlasRel = try {
+                            matchedAtlas.relativeTo(modelRoot).path
+                        } catch (e: Exception) {
+                            matchedAtlas.name
+                        }
                         put("atlasFile", atlasRel)
                     }
                 }
@@ -454,11 +460,6 @@ object SpineModelLoader {
                         relativeFile.parentFile?.mkdirs()
                         FileOutputStream(relativeFile).use { out ->
                             zip.copyTo(out)
-                        }
-
-                        val flatFile = File(targetDir, fileName)
-                        if (!flatFile.exists()) {
-                            relativeFile.copyTo(flatFile, overwrite = true)
                         }
                         count++
                     }
