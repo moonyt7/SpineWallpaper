@@ -129,6 +129,18 @@ class MainActivity : ComponentActivity() {
         } catch (e: Throwable) {
             e.printStackTrace()
         }
+        // 后台一次性回收旧版本造成的模型重复占用（幂等，由 prefs 标记只跑一次）
+        try {
+            Thread {
+                try {
+                    SpineModelLoader.cleanupLegacyModelFolders(this)
+                } catch (e: Throwable) {
+                    e.printStackTrace()
+                }
+            }.start()
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
         setContent {
             val themePrefs = remember { getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE) }
             var isDarkTheme by remember { mutableStateOf(themePrefs.getString("theme_mode", "dark") != "light") }

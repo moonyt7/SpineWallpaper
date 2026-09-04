@@ -203,8 +203,8 @@ object SpineModelLoader {
         }
 
         for (skelFile in uniqueSkelFiles) {
-            // 模型根目录：骨架文件直接位于压缩包根目录时，整个 staging 属于该模型；否则取其所在子目录
-            val modelRoot = if (skelFile.parentFile == stagingDir) stagingDir else (skelFile.parentFile ?: stagingDir)
+            // 骨架文件所在目录视为本模型的搜索根（可能是子目录，也可能压缩包根）
+            val modelRoot = skelFile.parentFile ?: stagingDir
 
             val modelId = UUID.randomUUID().toString()
             val targetDir = File(modelsRoot, modelId)
@@ -218,25 +218,87 @@ object SpineModelLoader {
             }
             val modelName = if (rawName.isEmpty()) "Spine Model" else rawName
 
-            // 保留目录结构复制模型根目录，不做平铺镜像，避免重复占用存储
-            modelRoot.copyRecursively(targetDir, overwrite = true)
+            val base = skelFile.nameWithoutExtension.removeSuffix(".skel").removeSuffix(".json")
 
-            val relativePath = skelFile.relativeTo(modelRoot).path
-            val targetSkelFile = File(targetDir, relativePath)
-            val finalSkelFile = if (targetSkelFile.exists()) targetSkelFile else skelFile
+            // ===== 最小依赖收集：不再整包 copyRecursively，只复制本角色自身用到的文件 =====
+            // 1. 骨架文件（.skel/.skel.bytes/.json/.json.txt）
+            // 2. 匹配的同名 .atlas（含 .atlas.txt）或该目录下唯一 atlas
+            // 3. atlas 文本中所有 page 引用的贴图（.png/.jpg/.webp）
+            // 4. 同名 .config.json（可选，提供 scale/动画偏好）
+            val dirFiles = modelRoot.listFiles()?.filter { it.isFile } ?: emptyList()
+
+            val matchedAtlas = dirFiles.firstOrNull {
+                val n = it.name.lowercase()
+                it.nameWithoutExtension.equals(base, ignoreCase = true) && (n.endsWith(".atlas") || n.endsWith(".atlas.txt"))
+            } ?: dirFiles.firstOrNull { it.name.lowercase().endsWith(".atlas") || it.name.lowercase().endsWith(".atlas.txt") }
+
+            val skelRel = skelFile.name
+            var atlasRel = matchedAtlas?.name
+
+            // 复制骨架文件（平铺到模型目录根）
+            skelFile.copyTo(File(targetDir, skelFile.name), overwrite = true)
+            val finalSkelFile = File(targetDir, skelFile.name)
+
+            // 收集 atlas 依赖的贴图源文件集合（源文件 -> 复制到目标用相对扁平名）
+            val imageSrcTargets = mutableListOf<Pair<File, String>>()
+            if (matchedAtlas != null) {
+                val atlasTargetName = matchedAtlas.name
+                matchedAtlas.copyTo(File(targetDir, atlasTargetName), overwrite = true)
+
+                val usedImages = resolveAtlasImages(matchedAtlas)
+                val nameToSrc = dirFiles.associateBy { it.name }
+                val lowerToSrc = dirFiles.associateBy { it.name.lowercase() }
+                for (img in usedImages) {
+                    val src = nameToSrc[img]
+                        ?: lowerToSrc[img.lowercase()]
+                        ?: lowerToSrc[File(img).name.lowercase()]
+                        ?: lowerToSrc[File(img).name.substringAfterLast('/').lowercase()]
+                    if (src != null) {
+                        imageSrcTargets.add(Pair(src, src.name))
+                    }
+                }
+
+                // 若无 .atlas 的同名贴图，但确实解析不到任何贴图且目录里只有单个贴图，回退复制目录内该角色前缀贴图
+                if (imageSrcTargets.isEmpty()) {
+                    dirFiles.filter { it.name.startsWith(base, ignoreCase = true) && isImageFile(it.name) }
+                        .forEach { imageSrcTargets.add(Pair(it, it.name)) }
+                }
+            } else {
+                // 无 atlas 时（少见），仅复制同前缀贴图，避免整包
+                dirFiles.filter { it.name.startsWith(base, ignoreCase = true) && isImageFile(it.name) }
+                    .forEach { imageSrcTargets.add(Pair(it, it.name)) }
+            }
+
+            // 复制贴图文件（覆盖式平铺到模型目录）
+            for ((src, flatName) in imageSrcTargets) {
+                try {
+                    src.copyTo(File(targetDir, flatName), overwrite = true)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+
+            // 复制同名 .config.json（若存在）
+            dirFiles.firstOrNull {
+                it.nameWithoutExtension.equals(base, ignoreCase = true) && it.name.lowercase().endsWith(".config.json")
+            }?.let { cfg ->
+                try { cfg.copyTo(File(targetDir, cfg.name), overwrite = true) } catch (e: Exception) { e.printStackTrace() }
+            }
+
+            // 骨架可能以 .skel 为主但模型需要 .json 做回退；若目录中还存在同前缀的备选骨架(.json/.skel.bytes)，也一并带上（体积小）
+            dirFiles.firstOrNull {
+                it.nameWithoutExtension.equals(base, ignoreCase = true) &&
+                    it.name != skelFile.name &&
+                    (it.name.lowercase().endsWith(".skel.bytes") || it.name.lowercase().endsWith(".json"))
+            }?.let { alt ->
+                try { alt.copyTo(File(targetDir, alt.name), overwrite = true) } catch (e: Exception) { e.printStackTrace() }
+            }
 
             // Detect Spine Version (3.6, 3.7, 3.8, 4.0, 4.1, 4.2)
             val detectedVer = SpineVersionDetector.detectVersionString(finalSkelFile)
             val detectedFmt = SpineVersionDetector.detectFormat(finalSkelFile)
 
-            val base = skelFile.nameWithoutExtension.removeSuffix(".skel").removeSuffix(".json")
-            val modelRootFiles = modelRoot.walkTopDown().filter { it.isFile }.toList()
-            val matchedAtlas = modelRootFiles.firstOrNull {
-                it.name.startsWith(base, ignoreCase = true) && (it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt"))
-            } ?: modelRootFiles.firstOrNull { it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt") }
-                ?: allFiles.firstOrNull { it.name.endsWith(".atlas") || it.name.endsWith(".atlas.txt") }
-
-            val (anims, skins) = SpineVersionDetector.peekAnimationsAndSkins(finalSkelFile, matchedAtlas)
+            val (anims, skins) = SpineVersionDetector.peekAnimationsAndSkins(finalSkelFile, File(targetDir, atlasRel ?: ""))
 
             val item = SpineModelItem(
                 id = modelId,
@@ -254,15 +316,8 @@ object SpineModelLoader {
                     put("name", modelName)
                     put("version", detectedVer)
                     put("format", detectedFmt)
-                    put("skelFile", relativePath)
-                    if (matchedAtlas != null) {
-                        val atlasRel = try {
-                            matchedAtlas.relativeTo(modelRoot).path
-                        } catch (e: Exception) {
-                            matchedAtlas.name
-                        }
-                        put("atlasFile", atlasRel)
-                    }
+                    put("skelFile", skelRel)
+                    if (atlasRel != null) put("atlasFile", atlasRel)
                 }
                 File(targetDir, "model_meta.json").writeText(metaObj.toString())
             } catch (e: Exception) {
@@ -318,6 +373,74 @@ object SpineModelLoader {
         }
 
         return result
+    }
+
+    /**
+     * 一次性回收旧版本导入造成的大量重复占用：
+     * 早期实现会把整包 ZIP（含多个角色）原样复制到每个模型目录，导致同一套 77 文件 ≈ 91MB
+     * 在每个模型目录里重复出现。这里按 model_meta.json 指向的最小依赖集，把每个模型目录中
+     * 用不到的皮肤/贴图/骨架文件清理掉，仅保留：model_meta.json + 骨架 + atlas + atlas 引用的贴图 + 同名 config。
+     * 幂等：处理过的目录（已无多余文件）再次执行几乎无操作。由 prefs 标记只跑一次。
+     */
+    fun cleanupLegacyModelFolders(context: Context) {
+        try {
+            val prefs = context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
+            if (prefs.getBoolean("model_storage_cleaned_v2", false)) return
+
+            val models = getSavedModels(context)
+            var reclaimedFiles = 0
+            for (m in models) {
+                try {
+                    val dir = File(m.folderPath)
+                    if (!dir.isDirectory) continue
+
+                    // 读取该模型的最小依赖名集合
+                    val keepNames = mutableSetOf<String>()
+                    keepNames.add("model_meta.json")
+                    val metaFile = File(dir, "model_meta.json")
+                    var skelName: String? = null
+                    var atlasName: String? = null
+                    if (metaFile.exists()) {
+                        try {
+                            val meta = JSONObject(metaFile.readText())
+                            skelName = meta.optString("skelFile").takeIf { it.isNotEmpty() }
+                            atlasName = meta.optString("atlasFile").takeIf { it.isNotEmpty() }
+                        } catch (e: Exception) { e.printStackTrace() }
+                    }
+                    if (skelName != null) keepNames.add(File(skelName).name)
+                    if (atlasName != null) {
+                        val atlasFile = File(dir, File(atlasName).name)
+                        keepNames.add(File(atlasName).name)
+                        if (atlasFile.exists()) {
+                            // atlas 引用的所有贴图保留
+                            resolveAtlasImages(atlasFile).forEach { keepNames.add(File(it).name) }
+                        }
+                    }
+
+                    // 兜底：若上面没解析出任何模型文件，跳过该目录（避免误删）
+                    if (keepNames.size <= 1) continue
+
+                    val dirFiles = dir.listFiles()?.filter { it.isFile } ?: emptyList()
+                    for (f in dirFiles) {
+                        val lower = f.name.lowercase()
+                        // 只清理这几类大文件：贴图、atlas、骨架、json。其它文件（如 meta）保留。
+                        val isCleanable = isImageFile(lower) ||
+                            lower.endsWith(".atlas") || lower.endsWith(".atlas.txt") ||
+                            lower.endsWith(".skel") || lower.endsWith(".skel.bytes") ||
+                            (lower.endsWith(".json") && !lower.endsWith("model_meta.json"))
+                        if (isCleanable && f.name !in keepNames) {
+                            if (f.delete()) reclaimedFiles++
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            prefs.edit().putBoolean("model_storage_cleaned_v2", true).apply()
+            android.util.Log.i("SpineLoader", "cleanupLegacyModelFolders done, reclaimedFiles=$reclaimedFiles")
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun saveModelMetadata(context: Context, item: SpineModelItem) {
@@ -444,6 +567,51 @@ object SpineModelLoader {
             return tempDir
         }
         return null
+    }
+
+    private fun isImageFile(name: String): Boolean {
+        val n = name.lowercase()
+        return n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".webp")
+    }
+
+    /**
+     * 解析 .atlas 文本中所有 page 引用的贴图文件路径。
+     * libGDX/Spine atlas 结构：每个 page 以一个贴图文件路径行开头（无缩进、无冒号），
+     * 其后紧跟 `size: <w>,<h>`（整张贴图尺寸），随后是若干 region。
+     * region 名行也是无冒号行，但其下一属性是 `rotate:` / `xy:` 等而非 `size:`，
+     * 因此用「下一非空行以 size: 开头」来区分贴图行与 region 名行。
+     */
+    private fun resolveAtlasImages(atlasFile: File): Set<String> {
+        val result = linkedSetOf<String>()
+        try {
+            val lines = atlasFile.readLines()
+            if (lines.isEmpty()) return result
+
+            // 逐行扫描，记录每个 token(无冒号行)，当下一个 token 之后出现 `size:` 属性行且该属性紧邻 token 之后，
+            // 说明该 token 是贴图文件行。
+            var i = 0
+            while (i < lines.size) {
+                var trimmed = lines[i].trim().removePrefix("\uFEFF").removePrefix("\uFFFE")
+                if (trimmed.isNotEmpty() && !trimmed.contains(':')) {
+                    // candidate token（贴图文件名 或 region 名）
+                    var j = i + 1
+                    // 跳过可能的空行
+                    while (j < lines.size && lines[j].trim().isEmpty()) j++
+                    val nextProp = if (j < lines.size) lines[j].trim() else ""
+                    if (nextProp.startsWith("size:")) {
+                        // 确认为贴图文件行
+                        val clean = trimmed.replace("\\", "/")
+                        val filePart = clean.substringAfterLast('/')
+                        if (filePart.isNotEmpty()) result.add(filePart)
+                        i = j
+                    }
+                }
+                i++
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return result
     }
 
     private fun extractZipToDir(inputStream: InputStream, targetDir: File): Int {
