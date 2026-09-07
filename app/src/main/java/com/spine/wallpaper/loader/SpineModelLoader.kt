@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import com.spine.wallpaper.bridge.SpineVersionDetector
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -235,15 +237,23 @@ object SpineModelLoader {
             val skelRel = skelFile.name
             var atlasRel = matchedAtlas?.name
 
-            // 复制骨架文件（平铺到模型目录根）
-            skelFile.copyTo(File(targetDir, skelFile.name), overwrite = true)
+            // 复制骨架文件（平铺到模型目录根，64KB 缓冲以加速大文件）
+            skelFile.inputStream().use { input ->
+                File(targetDir, skelFile.name).outputStream().use { out ->
+                    input.copyToWithBuffer(out)
+                }
+            }
             val finalSkelFile = File(targetDir, skelFile.name)
 
             // 收集 atlas 依赖的贴图源文件集合（源文件 -> 复制到目标用相对扁平名）
             val imageSrcTargets = mutableListOf<Pair<File, String>>()
             if (matchedAtlas != null) {
                 val atlasTargetName = matchedAtlas.name
-                matchedAtlas.copyTo(File(targetDir, atlasTargetName), overwrite = true)
+                matchedAtlas.inputStream().use { input ->
+                    File(targetDir, atlasTargetName).outputStream().use { out ->
+                        input.copyToWithBuffer(out)
+                    }
+                }
 
                 val usedImages = resolveAtlasImages(matchedAtlas)
                 val nameToSrc = dirFiles.associateBy { it.name }
@@ -269,10 +279,14 @@ object SpineModelLoader {
                     .forEach { imageSrcTargets.add(Pair(it, it.name)) }
             }
 
-            // 复制贴图文件（覆盖式平铺到模型目录）
+            // 复制贴图文件（覆盖式平铺到模型目录，64KB 缓冲）
             for ((src, flatName) in imageSrcTargets) {
                 try {
-                    src.copyTo(File(targetDir, flatName), overwrite = true)
+                    src.inputStream().use { input ->
+                        File(targetDir, flatName).outputStream().use { out ->
+                            input.copyToWithBuffer(out)
+                        }
+                    }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -282,7 +296,13 @@ object SpineModelLoader {
             dirFiles.firstOrNull {
                 it.nameWithoutExtension.equals(base, ignoreCase = true) && it.name.lowercase().endsWith(".config.json")
             }?.let { cfg ->
-                try { cfg.copyTo(File(targetDir, cfg.name), overwrite = true) } catch (e: Exception) { e.printStackTrace() }
+                try {
+                    cfg.inputStream().use { input ->
+                        File(targetDir, cfg.name).outputStream().use { out ->
+                            input.copyToWithBuffer(out)
+                        }
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
             // 骨架可能以 .skel 为主但模型需要 .json 做回退；若目录中还存在同前缀的备选骨架(.json/.skel.bytes)，也一并带上（体积小）
@@ -291,14 +311,35 @@ object SpineModelLoader {
                     it.name != skelFile.name &&
                     (it.name.lowercase().endsWith(".skel.bytes") || it.name.lowercase().endsWith(".json"))
             }?.let { alt ->
-                try { alt.copyTo(File(targetDir, alt.name), overwrite = true) } catch (e: Exception) { e.printStackTrace() }
+                try {
+                    alt.inputStream().use { input ->
+                        File(targetDir, alt.name).outputStream().use { out ->
+                            input.copyToWithBuffer(out)
+                        }
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
             // Detect Spine Version (3.6, 3.7, 3.8, 4.0, 4.1, 4.2)
             val detectedVer = SpineVersionDetector.detectVersionString(finalSkelFile)
             val detectedFmt = SpineVersionDetector.detectFormat(finalSkelFile)
 
-            val (anims, skins) = SpineVersionDetector.peekAnimationsAndSkins(finalSkelFile, File(targetDir, atlasRel ?: ""))
+            // ===== 性能关键路径 =====
+            // peekAnimationsAndSkins 对二进制 skel 会逐版本实例化 runtime 嗅探，
+            // 单角色耗时数百毫秒，多角色包下是导入速度最大瓶颈。
+            // 优化策略：
+            //   1) JSON 模型：直接 JSONObject.optJSONObject 读取，极快（保留原行为）
+            //   2) 二进制模型：跳过 peek，使用占位列表（"idle"/"default"），
+            //      导入后由 SpineGlRenderer 加载真实列表并写回 prefs。
+            val isBinary = detectedFmt.equals("SKEL", ignoreCase = true)
+            val (anims, skins) = if (isBinary) {
+                // 占位，导入后由后台异步填充真实值
+                val a = mutableListOf<String>(); a.add("idle")
+                val s = mutableListOf<String>(); s.add("default")
+                Pair(a, s)
+            } else {
+                SpineVersionDetector.peekAnimationsAndSkins(finalSkelFile, File(targetDir, atlasRel ?: ""))
+            }
 
             val item = SpineModelItem(
                 id = modelId,
@@ -324,14 +365,39 @@ object SpineModelLoader {
                 e.printStackTrace()
             }
 
-            saveModelMetadata(context, item)
             importedItems.add(item)
         }
+
+        // 一次性批量写 prefs（避免循环内每模型重写整张 JSON 表）
+        saveModelsPrefBatch(context, importedItems)
 
         stagingDir.deleteRecursively()
 
         if (importedItems.isNotEmpty()) {
             setActiveModelId(context, importedItems[0].id)
+        }
+
+        // 后台异步填充二进制模型的真实动画/皮肤列表，不阻塞当前返回
+        val binaryItems = importedItems.filter { it.format.equals("SKEL", ignoreCase = true) }
+        if (binaryItems.isNotEmpty()) {
+            try {
+                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    for (bi in binaryItems) {
+                        try {
+                            val metaFile = File(bi.folderPath, "model_meta.json")
+                            if (!metaFile.exists()) continue
+                            val meta = JSONObject(metaFile.readText())
+                            val skelFile = File(bi.folderPath, meta.optString("skelFile"))
+                            val atlasFile = File(bi.folderPath, meta.optString("atlasFile"))
+                            if (!skelFile.exists()) continue
+                            val (a, s) = SpineVersionDetector.peekAnimationsAndSkins(skelFile, atlasFile)
+                            if (a.isNotEmpty() || s.isNotEmpty()) {
+                                updateModelAnimSkins(context, bi.id, a, s)
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+            } catch (_: Throwable) {}
         }
 
         return@withContext importedItems
@@ -444,29 +510,80 @@ object SpineModelLoader {
     }
 
     private fun saveModelMetadata(context: Context, item: SpineModelItem) {
-        val list = getSavedModels(context).toMutableList()
-        list.removeAll { it.id == item.id }
-        list.add(0, item)
+        saveModelsPrefBatch(context, listOf(item))
+    }
 
-        val array = JSONArray()
-        list.forEach { m ->
-            val obj = JSONObject().apply {
-                put("id", m.id)
-                put("name", m.name)
-                put("folderPath", m.folderPath)
-                put("animations", JSONArray(m.animations))
-                put("skins", JSONArray(m.skins))
-                put("version", m.version)
-                put("format", m.format)
-                put("createdAt", m.createdAt)
+    /**
+     * 批量写入多个模型到 prefs 中：避免循环内每条都重读+重写整张 JSON 表（23 个角色时 23× 全表读写 → 1 次读写）。
+     * 同时去重：新列表中按 id 替换旧记录，新项目追加到列表头。
+     */
+    private fun saveModelsPrefBatch(context: Context, newItems: List<SpineModelItem>) {
+        try {
+            val list = getSavedModels(context).toMutableList()
+            val incomingIds = newItems.map { it.id }.toHashSet()
+            list.removeAll { it.id in incomingIds }
+            list.addAll(0, newItems)
+
+            val array = JSONArray()
+            list.forEach { m ->
+                val obj = JSONObject().apply {
+                    put("id", m.id)
+                    put("name", m.name)
+                    put("folderPath", m.folderPath)
+                    put("animations", JSONArray(m.animations))
+                    put("skins", JSONArray(m.skins))
+                    put("version", m.version)
+                    put("format", m.format)
+                    put("createdAt", m.createdAt)
+                }
+                array.put(obj)
             }
-            array.put(obj)
+            context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("saved_models_list_json", array.toString())
+                .apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
+    }
 
-        context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
-            .edit()
-            .putString("saved_models_list_json", array.toString())
-            .apply()
+    /**
+     * 后台异步更新某模型的动画/皮肤列表（用于二进制模型在运行时补全）。
+     * 仅修改 prefs 中的对应条目，磁盘文件不动；UI 在下次 refreshModelsList 时会读到新值。
+     */
+    fun updateModelAnimSkins(context: Context, modelId: String, animations: List<String>, skins: List<String>) {
+        try {
+            val list = getSavedModels(context).toMutableList()
+            val idx = list.indexOfFirst { it.id == modelId }
+            if (idx < 0) return
+            val orig = list[idx]
+            // 仅当新值不为占位（不是 ["idle"]/["default"]）时才覆盖
+            val newAnims = if (animations.size == 1 && animations[0] == "idle" && orig.animations.size > 1) orig.animations else animations
+            val newSkins = if (skins.size == 1 && skins[0] == "default" && orig.skins.size > 1) orig.skins else skins
+            if (newAnims == orig.animations && newSkins == orig.skins) return
+            list[idx] = orig.copy(animations = newAnims, skins = newSkins)
+
+            val array = JSONArray()
+            list.forEach { m ->
+                val obj = JSONObject().apply {
+                    put("id", m.id)
+                    put("name", m.name)
+                    put("folderPath", m.folderPath)
+                    put("animations", JSONArray(m.animations))
+                    put("skins", JSONArray(m.skins))
+                    put("version", m.version)
+                    put("format", m.format)
+                    put("createdAt", m.createdAt)
+                }
+                array.put(obj)
+            }
+            context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("saved_models_list_json", array.toString())
+                .apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     fun deleteModel(context: Context, modelId: String) {
@@ -617,7 +734,10 @@ object SpineModelLoader {
     private fun extractZipToDir(inputStream: InputStream, targetDir: File): Int {
         var count = 0
         try {
-            val zip = ZipInputStream(inputStream)
+            // 用 BufferedInputStream 包装后 ZipInputStream 性能显著优于裸流；
+            // 写文件时采用 64KB 缓冲，比 ZipInputStream.copyTo 默认 8KB 缓冲更快。
+            val buffered = if (inputStream is java.io.BufferedInputStream) inputStream else java.io.BufferedInputStream(inputStream)
+            val zip = ZipInputStream(buffered)
             var entry = zip.nextEntry
             while (entry != null) {
                 if (!entry.isDirectory) {
@@ -626,8 +746,8 @@ object SpineModelLoader {
                     if (fileName.isNotEmpty() && !fileName.startsWith(".") && !entryPath.contains("__MACOSX")) {
                         val relativeFile = File(targetDir, entryPath)
                         relativeFile.parentFile?.mkdirs()
-                        FileOutputStream(relativeFile).use { out ->
-                            zip.copyTo(out)
+                        relativeFile.outputStream().use { out ->
+                            zip.copyToWithBuffer(out)
                         }
                         count++
                     }
@@ -639,5 +759,15 @@ object SpineModelLoader {
             e.printStackTrace()
         }
         return count
+    }
+}
+
+/** 64KB 缓冲的复制，避免 ZipInputStream.copyTo 默认 8KB 缓冲在打包大量贴图时的频繁系统调用 */
+private fun java.io.InputStream.copyToWithBuffer(out: java.io.OutputStream, bufferSize: Int = 64 * 1024) {
+    val buf = ByteArray(bufferSize)
+    var n = read(buf)
+    while (n > 0) {
+        out.write(buf, 0, n)
+        n = read(buf)
     }
 }

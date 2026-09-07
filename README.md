@@ -1,6 +1,3 @@
-<img width="1280" height="2772" alt="09395f37fee583ca791be6f36584f967" src="https://github.com/user-attachments/assets/28efdad5-0d2d-40d9-8f08-6c1c0668ef51" />
-
-<img width="1280" height="2772" alt="13a4f7846c1b49437db70d6780bc4674" src="https://github.com/user-attachments/assets/4a044e55-0eae-4a14-924d-80eb34494818" />
 # SpineWallpaper - Android Spine 2D Live Wallpaper Application
 
 SpineWallpaper is a full-featured Android Live Wallpaper application built with **Kotlin**, **Jetpack Compose**, and the official **spine-android** runtime library with multi-runtime version isolation.

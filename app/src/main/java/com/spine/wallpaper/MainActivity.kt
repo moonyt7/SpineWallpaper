@@ -11,6 +11,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -116,7 +119,6 @@ private val LightUiPalette = UiPalette(
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Safeguard intent and bundle extras to prevent MIUI SuggestManager / ActivityThread deliverResultsIfNeeded NPE
         if (intent == null) {
             intent = Intent()
         }
@@ -124,12 +126,25 @@ class MainActivity : ComponentActivity() {
             intent.putExtras(Bundle())
         }
         super.onCreate(savedInstanceState)
+
+        // 沉浸式全屏
+        try {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            // 关键：禁用系统栏背景绘制
+            window.statusBarColor = Color.Transparent.toArgb()
+            window.navigationBarColor = Color.Transparent.toArgb()
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
+
         try {
             SpineModelLoader.ensureNativesLoaded()
         } catch (e: Throwable) {
             e.printStackTrace()
         }
-        // 后台一次性回收旧版本造成的模型重复占用（幂等，由 prefs 标记只跑一次）
         try {
             Thread {
                 try {
@@ -141,6 +156,7 @@ class MainActivity : ComponentActivity() {
         } catch (e: Throwable) {
             e.printStackTrace()
         }
+
         setContent {
             val themePrefs = remember { getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE) }
             var isDarkTheme by remember { mutableStateOf(themePrefs.getString("theme_mode", "dark") != "light") }
@@ -155,13 +171,17 @@ class MainActivity : ComponentActivity() {
                     surface = Color(0xFFE2E8F0)
                 )
             ) {
-                SpineWallpaperApp(
-                    isDarkTheme = isDarkTheme,
-                    onThemeChange = { dark -> isDarkTheme = dark }
-                )
+                // 核心：包裹一层，告诉compose不要自动应用window insets
+                Box(modifier = Modifier.fillMaxSize()) {
+                    SpineWallpaperApp(
+                        isDarkTheme = isDarkTheme,
+                        onThemeChange = { dark -> isDarkTheme = dark }
+                    )
+                }
             }
         }
     }
+
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
@@ -170,6 +190,18 @@ class MainActivity : ComponentActivity() {
                 intent.putExtras(Bundle())
             }
             setIntent(intent)
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 重新隐藏系统栏（部分 ROM/系统对话框/手电筒提醒等会临时显示）
+        if (hasFocus) {
+            try {
+                val controller = WindowInsetsControllerCompat(window, window.decorView)
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } catch (_: Throwable) {}
         }
     }
 }
@@ -388,13 +420,16 @@ fun SpineWallpaperApp(
         drawerContent = {
             ModalDrawerSheet(
                 drawerContainerColor = palette.drawerBg,
-                modifier = Modifier.width(320.dp)
+                modifier = Modifier.width(320.dp),
+                windowInsets = WindowInsets(0,0,0,0)
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(16.dp)
                 ) {
+                    // ========== 这里面你的所有原有drawer内容完全不动 ==========
+
                     // Header Area
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1124,14 +1159,20 @@ fun SpineWallpaperApp(
             }
         }
     ) {
-        Scaffold { paddingValues ->
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            contentWindowInsets = WindowInsets(0,0,0,0)
+        ) { innerPadding ->
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(paddingValues)
+                    .padding(innerPadding)
                     .background(selectedBgColor)
             ) {
-                if (activeModelDir != null) {
+
+
+
+            if (activeModelDir != null) {
                     SpineViewCompose(
                         modelDir = activeModelDir,
                         model2Dir = model2Dir,
