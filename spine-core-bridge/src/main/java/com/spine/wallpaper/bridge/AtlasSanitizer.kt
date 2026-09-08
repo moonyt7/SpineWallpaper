@@ -26,6 +26,11 @@ object AtlasSanitizer {
 
             for (rawLine in lines) {
                 var line = rawLine
+                // 去掉 UTF-8 BOM（出现在文件首行开头，会使贴图文件名变成 \uFEFFxxx.png 而无法匹配磁盘文件）
+                if (line.isNotEmpty() && (line[0] == '\uFEFF' || line[0] == '\uFFFE')) {
+                    line = line.substring(1)
+                    modified = true
+                }
                 if (line.contains("\\")) {
                     line = line.replace("\\", "/")
                     modified = true
