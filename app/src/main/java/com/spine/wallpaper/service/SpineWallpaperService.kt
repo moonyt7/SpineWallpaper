@@ -11,6 +11,31 @@ import kotlinx.coroutines.*
 import java.io.File
 
 /**
+ * 读取槽位已选皮肤集合：
+ *   1) 优先 `active_skins_json[_2]` (JSONArray) —— 新格式
+ *   2) fallback `fallbackSingle` (String) —— 旧单选字段或预读取的兼容值
+ * 返回的集合可能为空，调用方应自行保证至少有一个皮肤。
+ */
+private fun readSelectedSkins(prefs: SharedPreferences, slot: Int, fallbackSingle: String?): Set<String> {
+    val key = if (slot == 1) "active_skins_json_2" else "active_skins_json"
+    val result = LinkedHashSet<String>()
+    val json = prefs.getString(key, null)
+    if (!json.isNullOrEmpty()) {
+        try {
+            val arr = org.json.JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val name = arr.optString(i, "").trim()
+                if (name.isNotEmpty()) result.add(name)
+            }
+        } catch (_: Throwable) {}
+    }
+    if (result.isEmpty() && !fallbackSingle.isNullOrEmpty()) {
+        result.add(fallbackSingle)
+    }
+    return result
+}
+
+/**
  * Android WallpaperService implementation for Spine 2D animations.
  * Uses OpenGL ES via custom SurfaceHolder EGL engine.
  * Pauses rendering on screen off / invisible to maximize battery efficiency.
@@ -175,13 +200,19 @@ class SpineWallpaperService : WallpaperService() {
                     if (!activeAnim.isNullOrEmpty()) {
                         spineRenderer?.playAnimation(activeAnim, true, SpineGlRenderer.SLOT_PRIMARY)
                     }
-                    if (!activeSkin.isNullOrEmpty()) {
+                    val activeSkins = readSelectedSkins(prefs, slot = 0, fallbackSingle = activeSkin)
+                    if (activeSkins.isNotEmpty()) {
+                        spineRenderer?.setSelectedSkins(activeSkins, SpineGlRenderer.SLOT_PRIMARY)
+                    } else if (!activeSkin.isNullOrEmpty()) {
                         spineRenderer?.setSkin(activeSkin, SpineGlRenderer.SLOT_PRIMARY)
                     }
                     if (!activeAnim2.isNullOrEmpty()) {
                         spineRenderer?.playAnimation(activeAnim2, true, SpineGlRenderer.SLOT_SECONDARY)
                     }
-                    if (!activeSkin2.isNullOrEmpty()) {
+                    val activeSkins2 = readSelectedSkins(prefs, slot = 1, fallbackSingle = activeSkin2)
+                    if (activeSkins2.isNotEmpty()) {
+                        spineRenderer?.setSelectedSkins(activeSkins2, SpineGlRenderer.SLOT_SECONDARY)
+                    } else if (!activeSkin2.isNullOrEmpty()) {
                         spineRenderer?.setSkin(activeSkin2, SpineGlRenderer.SLOT_SECONDARY)
                     }
                 } catch (e: Exception) {
@@ -248,10 +279,10 @@ class SpineWallpaperService : WallpaperService() {
                         spineRenderer?.playAnimation(anim, true, SpineGlRenderer.SLOT_PRIMARY)
                     }
                 }
-                "active_skin_name" -> {
-                    val skin = prefs?.getString("active_skin_name", null)
-                    if (!skin.isNullOrEmpty()) {
-                        spineRenderer?.setSkin(skin, SpineGlRenderer.SLOT_PRIMARY)
+                "active_skin_name", "active_skins_json" -> {
+                    val set = if (prefs != null) readSelectedSkins(prefs, slot = 0, fallbackSingle = prefs.getString("active_skin_name", null)) else emptySet()
+                    if (set.isNotEmpty()) {
+                        spineRenderer?.setSelectedSkins(set, SpineGlRenderer.SLOT_PRIMARY)
                     }
                 }
                 "model2_animation" -> {
@@ -260,10 +291,10 @@ class SpineWallpaperService : WallpaperService() {
                         spineRenderer?.playAnimation(anim, true, SpineGlRenderer.SLOT_SECONDARY)
                     }
                 }
-                "model2_skin" -> {
-                    val skin = prefs?.getString("model2_skin", null)
-                    if (!skin.isNullOrEmpty()) {
-                        spineRenderer?.setSkin(skin, SpineGlRenderer.SLOT_SECONDARY)
+                "model2_skin", "active_skins_json_2" -> {
+                    val set = if (prefs != null) readSelectedSkins(prefs, slot = 1, fallbackSingle = prefs.getString("model2_skin", null)) else emptySet()
+                    if (set.isNotEmpty()) {
+                        spineRenderer?.setSelectedSkins(set, SpineGlRenderer.SLOT_SECONDARY)
                     }
                 }
                 "pma_enabled", "pma2_enabled" -> {

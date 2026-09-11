@@ -634,6 +634,23 @@ class Skeleton38(val data: SkeletonData38) {
         return null
     }
 
+    /**
+     * 多选叠加：将指定 skin 的所有 attachment 合并到当前 skin，
+     * 不会移除之前已叠加的内容。已存在同名 key 时由新 skin 覆盖。
+     * 如果当前没有选中 skin，则等价于 setSkin(name)。
+     */
+    fun addSkin(skinName: String) {
+        val source = data.findSkin(skinName) ?: return
+        if (skin == null) {
+            this.skin = source
+            return
+        }
+        val target = skin!!
+        for ((key, att) in source.attachments) {
+            target.attachments[key] = att
+        }
+    }
+
     fun updateWorldTransform() {
         for (bone in bones) {
             bone.updateWorldTransform()

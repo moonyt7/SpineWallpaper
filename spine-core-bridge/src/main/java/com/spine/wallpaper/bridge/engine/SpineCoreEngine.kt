@@ -40,6 +40,13 @@ class Spine38EngineInstance(
         } catch (_: Throwable) {}
     }
 
+    override fun addSkin(skinName: String) {
+        try {
+            skeleton.addSkin(skinName)
+            skeleton.setSlotsToSetupPose()
+        } catch (_: Throwable) {}
+    }
+
     override fun setPremultipliedAlpha(pma: Boolean) {
         renderer.setPremultipliedAlpha(pma)
     }

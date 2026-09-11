@@ -117,6 +117,55 @@ private val LightUiPalette = UiPalette(
     dialogBg = Color(0xFFFFFFFF)
 )
 
+/**
+ * 读取槽位已选皮肤集合：
+ *   1) 优先 `active_skins_json` (JSONArray of string) —— 新格式
+ *   2) fallback `active_skin_name` (String) —— 旧格式迁移
+ *   3) fallback 该模型 skinNames 第一个
+ * 过滤掉当前模型已不存在的皮肤名；保证至少有一个皮肤。
+ */
+private fun loadSelectedSkins(
+    prefs: android.content.SharedPreferences,
+    slot: Int,
+    available: List<String>
+): Set<String> {
+    val key = if (slot == 1) "active_skins_json_2" else "active_skins_json"
+    val result = LinkedHashSet<String>()
+    val json = prefs.getString(key, null)
+    if (!json.isNullOrEmpty()) {
+        try {
+            val arr = org.json.JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val name = arr.optString(i, "").trim()
+                if (name.isNotEmpty() && available.contains(name)) result.add(name)
+            }
+        } catch (_: Throwable) {}
+    }
+    if (result.isEmpty()) {
+        val legacy = prefs.getString(if (slot == 1) "model2_skin" else "active_skin_name", null)
+        if (!legacy.isNullOrEmpty() && available.contains(legacy)) result.add(legacy)
+    }
+    if (result.isEmpty()) {
+        available.firstOrNull()?.let { result.add(it) }
+    }
+    return result
+}
+
+private fun saveSelectedSkins(
+    prefs: android.content.SharedPreferences,
+    slot: Int,
+    set: Set<String>
+) {
+    val key = if (slot == 1) "active_skins_json_2" else "active_skins_json"
+    val arr = org.json.JSONArray()
+    for (n in set) arr.put(n)
+    prefs.edit()
+        .putString(key, arr.toString())
+        // 兼容旧字段（写第一个）
+        .putString(if (slot == 1) "model2_skin" else "active_skin_name", set.firstOrNull())
+        .apply()
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         if (intent == null) {
@@ -228,7 +277,7 @@ fun SpineWallpaperApp(
     var animationList2 by remember { mutableStateOf<List<String>>(emptyList()) }
     var skinList2 by remember { mutableStateOf<List<String>>(emptyList()) }
     var currentAnimation2 by remember { mutableStateOf<String?>(null) }
-    var currentSkin2 by remember { mutableStateOf<String?>(null) }
+    var currentSkins2 by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     // 当前正在调整的槽位（0 = 主模型，1 = 副模型）
     var selectedSlot by remember { mutableStateOf(prefs.getInt("selected_slot", 0)) }
@@ -237,7 +286,7 @@ fun SpineWallpaperApp(
     var skinList by remember { mutableStateOf<List<String>>(emptyList()) }
 
     var currentAnimation by remember { mutableStateOf<String?>(null) }
-    var currentSkin by remember { mutableStateOf<String?>(null) }
+    var currentSkins by remember { mutableStateOf<Set<String>>(emptySet()) }
     var isPlaying by remember { mutableStateOf(true) }
     var scaleValue by remember { mutableStateOf(prefs.getFloat("model_scale", 1.0f)) }
     var scale2Value by remember { mutableStateOf(prefs.getFloat("model2_scale", 1.0f)) }
@@ -277,7 +326,7 @@ fun SpineWallpaperApp(
                 // 恢复上次选中的动画，避免启动后总是回到第一个
                 val savedAnim = prefs.getString("active_animation_name", null)
                 currentAnimation = if (savedAnim != null && activeItem.animations.contains(savedAnim)) savedAnim else activeItem.animations.firstOrNull()
-                currentSkin = activeItem.skins.firstOrNull()
+                currentSkins = loadSelectedSkins(prefs, 0, activeItem.skins)
             } else {
                 activeModelDir = SpineModelLoader.getActiveModelDir(context)
             }
@@ -294,13 +343,13 @@ fun SpineWallpaperApp(
             skinList2 = item2.skins
             val savedAnim2 = prefs.getString("model2_animation", null)
             currentAnimation2 = if (savedAnim2 != null && item2.animations.contains(savedAnim2)) savedAnim2 else item2.animations.firstOrNull()
-            currentSkin2 = item2.skins.firstOrNull()
+            currentSkins2 = loadSelectedSkins(prefs, 1, item2.skins)
         } else {
             model2Dir = null
             animationList2 = emptyList()
             skinList2 = emptyList()
             currentAnimation2 = null
-            currentSkin2 = null
+            currentSkins2 = emptySet()
         }
 
         // 选中槽位失效时回退到主模型
@@ -774,7 +823,7 @@ fun SpineWallpaperApp(
                         if (if (selectedSlot == 1) skinList2.isNotEmpty() else skinList.isNotEmpty()) {
                             item {
                                 val slotSkins = if (selectedSlot == 1) skinList2 else skinList
-                                val slotCurSkin = if (selectedSlot == 1) currentSkin2 else currentSkin
+                                val slotCurSkins = if (selectedSlot == 1) currentSkins2 else currentSkins
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -801,19 +850,30 @@ fun SpineWallpaperApp(
                                 if (isSkinsExpanded) {
                                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         items(slotSkins) { skin ->
-                                            val isSelected = skin == slotCurSkin
+                                            val isSelected = skin in slotCurSkins
                                             FilterChip(
                                                 selected = isSelected,
                                                 onClick = {
-                                                    if (selectedSlot == 1) {
-                                                        currentSkin2 = skin
+                                                    val mutable = LinkedHashSet(slotCurSkins)
+                                                    val newSet: Set<String> = if (isSelected) {
+                                                        // 取消选中：若集合变空则保留一个 default / 第一个，避免模型无皮肤
+                                                        mutable.remove(skin)
+                                                        if (mutable.isEmpty()) {
+                                                            val fallback = slotSkins.firstOrNull { it.equals("default", ignoreCase = true) }
+                                                                ?: slotSkins.firstOrNull()
+                                                            if (fallback != null) mutable.add(fallback) else mutable
+                                                        }
+                                                        mutable
                                                     } else {
-                                                        currentSkin = skin
+                                                        mutable.add(skin)
+                                                        mutable
                                                     }
-                                                    context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
-                                                        .edit()
-                                                        .putString(SpineModelLoader.SlotPrefs.skinKey(selectedSlot), skin)
-                                                        .apply()
+                                                    if (selectedSlot == 1) currentSkins2 = newSet else currentSkins = newSet
+                                                    saveSelectedSkins(
+                                                        context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE),
+                                                        selectedSlot,
+                                                        newSet
+                                                    )
                                                 },
                                                 label = { Text(skin) }
                                             )
@@ -1184,8 +1244,8 @@ fun SpineWallpaperApp(
                         pma2 = isPma2,
                         activeAnimation = currentAnimation,
                         activeAnimation2 = currentAnimation2,
-                        activeSkin = currentSkin,
-                        activeSkin2 = currentSkin2,
+                        activeSkins = currentSkins,
+                        activeSkins2 = currentSkins2,
                         bgColor = selectedBgColor,
                         bgImagePath = customBgPath,
                         resetTick = resetTick,

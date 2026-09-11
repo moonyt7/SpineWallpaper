@@ -18,6 +18,7 @@ import com.spine.wallpaper.loader.SpineModelLoader
 import com.spine.wallpaper.model.Live2DConfig
 import org.json.JSONObject
 import java.io.File
+import java.util.LinkedHashSet
 
 /**
  * Robust OpenGL ES Renderer managing Spine Skeleton & AnimationState loops on SurfaceHolder with EGL14 context.
@@ -49,6 +50,10 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
         var isPma = true
         var pendingAnimationName: String? = null
         var pendingSkinName: String? = null
+        /** 已选皮肤（含基底），用于多选叠加 */
+        val selectedSkins: LinkedHashSet<String> = LinkedHashSet()
+        /** 模型未就绪时排队等待执行的 addSkin 列表（已 selectedSkins 之外的增量） */
+        val pendingAddSkins: MutableList<String> = mutableListOf()
 
         fun releaseSlot() {
             try {
@@ -63,6 +68,8 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
             }
             instance = null
             atlas = null
+            selectedSkins.clear()
+            pendingAddSkins.clear()
         }
     }
 
@@ -201,6 +208,10 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     fun setSkin(skinName: String, slot: Int = SLOT_PRIMARY) {
         val s = slotAt(slot) ?: return
         synchronized(this) {
+            // 单选：清空多选状态后只保留当前一个基底皮肤
+            s.selectedSkins.clear()
+            s.pendingAddSkins.clear()
+            s.selectedSkins.add(skinName)
             val model = s.instance ?: run {
                 s.pendingSkinName = skinName
                 return
@@ -211,6 +222,89 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                 e.printStackTrace()
             }
         }
+    }
+
+    /**
+     * 多选：叠加一个皮肤，不影响之前已选的皮肤。
+     * 已包含同名皮肤时为 no-op。
+     */
+    fun addSkin(skinName: String, slot: Int = SLOT_PRIMARY) {
+        val s = slotAt(slot) ?: return
+        synchronized(this) {
+            if (!s.selectedSkins.add(skinName)) return  // 已选过
+            val model = s.instance ?: run {
+                s.pendingAddSkins.add(skinName)
+                return
+            }
+            try {
+                model.addSkin(skinName)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    /**
+     * 取消选中：从已选集合中移除一个皮肤。若移除后集合为空或缺少底层基底，
+     * 则回退到首个 skin 名为基底（保证模型至少有皮肤可显示）。
+     */
+    fun removeSkin(skinName: String, slot: Int = SLOT_PRIMARY) {
+        val s = slotAt(slot) ?: return
+        synchronized(this) {
+            if (!s.selectedSkins.remove(skinName)) return
+            val model = s.instance
+            if (s.selectedSkins.isEmpty()) {
+                // 至少保留一个（data.defaultSkin 或第一个可用皮肤）
+                val fallback = model?.skinNames?.firstOrNull { it.equals("default", ignoreCase = true) }
+                    ?: model?.skinNames?.firstOrNull()
+                if (fallback != null) {
+                    s.selectedSkins.add(fallback)
+                    try { model?.setSkin(fallback) } catch (e: Exception) { e.printStackTrace() }
+                }
+            } else {
+                // 已选集合非空：当前 spine runtime 缺乏「删除单个 attachment」语义，
+                // 最稳妥的方式是重放：先 setSkin 到第一个 selected，再 addSkin 其余
+                try {
+                    val first = s.selectedSkins.first()
+                    model?.setSkin(first)
+                    for (other in s.selectedSkins.drop(1)) {
+                        model?.addSkin(other)
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+        }
+    }
+
+    /**
+     * 整体替换已选皮肤集合（保留顺序，按集合中第一个为基底，其余为叠加）。
+     * 模型未就绪时全部进入 pending 队列。
+     */
+    fun setSelectedSkins(skinNames: Set<String>, slot: Int = SLOT_PRIMARY) {
+        val s = slotAt(slot) ?: return
+        synchronized(this) {
+            s.selectedSkins.clear()
+            s.pendingAddSkins.clear()
+            if (skinNames.isEmpty()) return
+            s.selectedSkins.addAll(skinNames)
+            val model = s.instance
+            if (model == null) {
+                s.pendingSkinName = s.selectedSkins.first()
+                s.pendingAddSkins.addAll(s.selectedSkins.drop(1))
+                return
+            }
+            try {
+                val first = s.selectedSkins.first()
+                model.setSkin(first)
+                for (other in s.selectedSkins.drop(1)) {
+                    model.addSkin(other)
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+
+    fun getSelectedSkins(slot: Int = SLOT_PRIMARY): List<String> {
+        val s = slotAt(slot) ?: return emptyList()
+        return synchronized(this) { s.selectedSkins.toList() }
     }
 
     fun setBackgroundColor(r: Float, g: Float, b: Float, a: Float = 1.0f) {
@@ -489,6 +583,21 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                 try {
                     instance.setSkin(targetSkin)
                 } catch (_: Exception) {}
+            }
+            // 若 setSkin 由上层（setSelectedSkins）预先设了基底，且 selectedSkins 已有内容，
+            // 需保证 selectedSkins 与 model 实际状态一致。
+            s.selectedSkins.clear()
+            s.selectedSkins.add(targetSkin ?: "")
+            // 应用排队中的叠加皮肤（来自 addSkin 在模型未就绪时累积的请求）
+            if (s.pendingAddSkins.isNotEmpty()) {
+                val pending = s.pendingAddSkins.filter { skinNames.contains(it) }
+                s.pendingAddSkins.clear()
+                for (name in pending) {
+                    try {
+                        instance.addSkin(name)
+                        s.selectedSkins.add(name)
+                    } catch (_: Exception) {}
+                }
             }
             s.pendingSkinName = null
 

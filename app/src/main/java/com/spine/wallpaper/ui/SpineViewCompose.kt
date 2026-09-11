@@ -43,6 +43,12 @@ fun SpineViewCompose(
     activeAnimation2: String? = null,
     activeSkin: String? = null,
     activeSkin2: String? = null,
+    /**
+     * 多选皮肤集合：第一个作为基底，剩余叠加。优先级高于 activeSkin。
+     * 为空时若 activeSkin 非空则回退到单选模式。
+     */
+    activeSkins: Set<String> = emptySet(),
+    activeSkins2: Set<String> = emptySet(),
     bgColor: Color = Color(0xFF0F172A),
     bgImagePath: String? = null,
     resetTick: Int = 0,
@@ -233,14 +239,18 @@ fun SpineViewCompose(
         }
     }
 
-    LaunchedEffect(activeSkin) {
-        if (!activeSkin.isNullOrEmpty()) {
+    LaunchedEffect(activeSkins, activeSkin) {
+        if (activeSkins.isNotEmpty()) {
+            renderer.setSelectedSkins(activeSkins, SpineGlRenderer.SLOT_PRIMARY)
+        } else if (!activeSkin.isNullOrEmpty()) {
             renderer.setSkin(activeSkin, SpineGlRenderer.SLOT_PRIMARY)
         }
     }
 
-    LaunchedEffect(activeSkin2) {
-        if (!activeSkin2.isNullOrEmpty()) {
+    LaunchedEffect(activeSkins2, activeSkin2) {
+        if (activeSkins2.isNotEmpty()) {
+            renderer.setSelectedSkins(activeSkins2, SpineGlRenderer.SLOT_SECONDARY)
+        } else if (!activeSkin2.isNullOrEmpty()) {
             renderer.setSkin(activeSkin2, SpineGlRenderer.SLOT_SECONDARY)
         }
     }

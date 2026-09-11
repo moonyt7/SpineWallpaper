@@ -13,6 +13,7 @@ interface ISpineEngineInstance {
 
     fun setAnimation(trackIndex: Int, name: String, loop: Boolean)
     fun setSkin(skinName: String)
+    fun addSkin(skinName: String)
     fun setPremultipliedAlpha(pma: Boolean)
     fun update(delta: Float)
     fun setPosition(x: Float, y: Float)

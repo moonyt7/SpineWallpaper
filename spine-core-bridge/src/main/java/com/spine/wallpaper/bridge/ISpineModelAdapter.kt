@@ -35,9 +35,15 @@ interface ISpineModelAdapter {
     fun setAnimation(trackIndex: Int, animationName: String, loop: Boolean)
 
     /**
-     * Sets the active skin by name.
+     * Sets the active skin by name (replaces any previously selected skins).
      */
     fun setSkin(skinName: String)
+
+    /**
+     * Adds a skin to the active selection without removing previously selected skins.
+     * Used to compose multi-part outfits / stacked attachments.
+     */
+    fun addSkin(skinName: String)
 
     /**
      * Configures premultiplied alpha (PMA) blending for textures.

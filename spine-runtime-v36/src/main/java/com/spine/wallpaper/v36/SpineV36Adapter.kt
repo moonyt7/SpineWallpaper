@@ -190,6 +190,34 @@ class SpineV36Adapter(
         }
     }
 
+    /**
+     * 多选叠加：保留当前皮肤，把目标皮肤合并进来（同名 slot+attachment 由新皮肤覆盖）。
+     *
+     * 官方 Spine 的 Skeleton 没有 addSkin，必须借助 Skin 组合实现：
+     * 新建一个 Skin，先合并「当前皮肤」再合并「目标皮肤」，最后 setSkin 回 skeleton。
+     * 注意 3.6/3.7 的 Skin 合并方法名是 addAttachments，3.8+ 才改名为 addSkin。
+     */
+    override fun addSkin(skinName: String) {
+        try {
+            val skel = skeleton ?: return
+            val source = skeletonData?.findSkin(skinName) ?: return
+            val current = skel.skin
+            if (current == null) {
+                skel.setSkin(source)
+                skel.setSlotsToSetupPose()
+                return
+            }
+            if (current === source) return
+            val combined = Skin(COMBINED_SKIN_NAME)
+            combined.addAttachments(current)
+            combined.addAttachments(source)
+            skel.setSkin(combined)
+            skel.setSlotsToSetupPose()
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
+    }
+
     override fun setPremultipliedAlpha(pma: Boolean) {
         // 不同槽位 PMA 模式不同（multiply vs normal），由 render() 内部按 slot 动态决定。
         // 这里只更新字段标记，不影响实际渲染。
@@ -253,3 +281,6 @@ private class PeekAttachmentLoader : AttachmentLoader {
     override fun newPathAttachment(skin: Skin, name: String): PathAttachment = PathAttachment(name)
     override fun newPointAttachment(skin: Skin, name: String): PointAttachment = PointAttachment(name)
 }
+
+/** 多选叠加时临时构造的复合皮肤名，仅存在于运行时，不是模型自带皮肤。 */
+private const val COMBINED_SKIN_NAME = "__combined__"

@@ -150,6 +150,7 @@ object SpineMultiRuntimeManager {
                 instance.setAnimation(trackIndex, animationName, loop)
             }
             override fun setSkin(skinName: String) { instance.setSkin(skinName) }
+            override fun addSkin(skinName: String) { instance.addSkin(skinName) }
             override fun setPremultipliedAlpha(pma: Boolean) { instance.setPremultipliedAlpha(pma) }
             override fun setTransform(scale: Float, offsetX: Float, offsetY: Float) {
                 instance.setScale(scale, scale)
