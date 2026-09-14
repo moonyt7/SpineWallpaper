@@ -15,6 +15,9 @@ import java.io.InputStream
 import java.util.UUID
 import java.util.zip.ZipInputStream
 
+/** 未显式指定分组时的默认分组名。 */
+const val DEFAULT_MODEL_GROUP = "未分组"
+
 data class SpineModelItem(
     val id: String,
     val name: String,
@@ -23,7 +26,9 @@ data class SpineModelItem(
     val skins: List<String>,
     val version: String = "4.1",
     val format: String = "SKEL",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** 所属分组名（模型库分组），空串按 [DEFAULT_MODEL_GROUP] 处理。 */
+    val group: String = DEFAULT_MODEL_GROUP
 )
 
 /**
@@ -147,7 +152,15 @@ object SpineModelLoader {
         }
     }
 
-    suspend fun importZipToLibrary(context: Context, uri: Uri): List<SpineModelItem> = withContext(Dispatchers.IO) {
+    /**
+     * 导入 ZIP 到模型库。
+     * @param group 目标分组名；不传则归入 [DEFAULT_MODEL_GROUP]。
+     */
+    suspend fun importZipToLibrary(
+        context: Context,
+        uri: Uri,
+        group: String = DEFAULT_MODEL_GROUP
+    ): List<SpineModelItem> = withContext(Dispatchers.IO) {
         ensureNativesLoaded()
 
         val stagingDir = File(context.cacheDir, "zip_staging_" + UUID.randomUUID().toString())
@@ -348,7 +361,8 @@ object SpineModelLoader {
                 animations = anims,
                 skins = skins,
                 version = detectedVer,
-                format = detectedFmt
+                format = detectedFmt,
+                group = group.ifBlank { DEFAULT_MODEL_GROUP }
             )
 
             try {
@@ -358,6 +372,7 @@ object SpineModelLoader {
                     put("version", detectedVer)
                     put("format", detectedFmt)
                     put("skelFile", skelRel)
+                    put("group", group.ifBlank { DEFAULT_MODEL_GROUP })
                     if (atlasRel != null) put("atlasFile", atlasRel)
                 }
                 File(targetDir, "model_meta.json").writeText(metaObj.toString())
@@ -430,7 +445,8 @@ object SpineModelLoader {
                         skins = skins,
                         version = obj.optString("version", "4.1"),
                         format = obj.optString("format", "SKEL"),
-                        createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                        createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
+                        group = obj.optString("group", DEFAULT_MODEL_GROUP).ifBlank { DEFAULT_MODEL_GROUP }
                     )
                 )
             }
@@ -439,6 +455,33 @@ object SpineModelLoader {
         }
 
         return result
+    }
+
+    /**
+     * 当前模型库中的所有分组名。顺序：[DEFAULT_MODEL_GROUP]（若存在）优先，其余按在模型列表中
+     * 首次出现的顺序。分组由模型推导，不单独存储 —— 分组内模型被删空后该分组自动消失。
+     */
+    fun getGroups(context: Context): List<String> {
+        val groups = getSavedModels(context).map { it.group.ifBlank { DEFAULT_MODEL_GROUP } }
+        val ordered = LinkedHashSet<String>()
+        if (groups.contains(DEFAULT_MODEL_GROUP)) ordered.add(DEFAULT_MODEL_GROUP)
+        ordered.addAll(groups)
+        return ordered.toList()
+    }
+
+    /** 把某个模型移动到指定分组（分组名不存在时即新建）。 */
+    fun setModelGroup(context: Context, modelId: String, group: String) {
+        try {
+            val list = getSavedModels(context).toMutableList()
+            val idx = list.indexOfFirst { it.id == modelId }
+            if (idx < 0) return
+            val target = group.trim().ifBlank { DEFAULT_MODEL_GROUP }
+            if (list[idx].group == target) return
+            list[idx] = list[idx].copy(group = target)
+            writeModelsPref(context, list)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     /**
@@ -517,31 +560,36 @@ object SpineModelLoader {
      * 批量写入多个模型到 prefs 中：避免循环内每条都重读+重写整张 JSON 表（23 个角色时 23× 全表读写 → 1 次读写）。
      * 同时去重：新列表中按 id 替换旧记录，新项目追加到列表头。
      */
+    /** 单个模型 → JSON。新增字段时只需改这一处，避免多处序列化漏字段。 */
+    private fun modelToJson(m: SpineModelItem): JSONObject = JSONObject().apply {
+        put("id", m.id)
+        put("name", m.name)
+        put("folderPath", m.folderPath)
+        put("animations", JSONArray(m.animations))
+        put("skins", JSONArray(m.skins))
+        put("version", m.version)
+        put("format", m.format)
+        put("createdAt", m.createdAt)
+        put("group", m.group)
+    }
+
+    /** 整张模型表写回 prefs。 */
+    private fun writeModelsPref(context: Context, models: List<SpineModelItem>) {
+        val array = JSONArray()
+        models.forEach { array.put(modelToJson(it)) }
+        context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("saved_models_list_json", array.toString())
+            .apply()
+    }
+
     private fun saveModelsPrefBatch(context: Context, newItems: List<SpineModelItem>) {
         try {
             val list = getSavedModels(context).toMutableList()
             val incomingIds = newItems.map { it.id }.toHashSet()
             list.removeAll { it.id in incomingIds }
             list.addAll(0, newItems)
-
-            val array = JSONArray()
-            list.forEach { m ->
-                val obj = JSONObject().apply {
-                    put("id", m.id)
-                    put("name", m.name)
-                    put("folderPath", m.folderPath)
-                    put("animations", JSONArray(m.animations))
-                    put("skins", JSONArray(m.skins))
-                    put("version", m.version)
-                    put("format", m.format)
-                    put("createdAt", m.createdAt)
-                }
-                array.put(obj)
-            }
-            context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
-                .edit()
-                .putString("saved_models_list_json", array.toString())
-                .apply()
+            writeModelsPref(context, list)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -562,25 +610,7 @@ object SpineModelLoader {
             val newSkins = if (skins.size == 1 && skins[0] == "default" && orig.skins.size > 1) orig.skins else skins
             if (newAnims == orig.animations && newSkins == orig.skins) return
             list[idx] = orig.copy(animations = newAnims, skins = newSkins)
-
-            val array = JSONArray()
-            list.forEach { m ->
-                val obj = JSONObject().apply {
-                    put("id", m.id)
-                    put("name", m.name)
-                    put("folderPath", m.folderPath)
-                    put("animations", JSONArray(m.animations))
-                    put("skins", JSONArray(m.skins))
-                    put("version", m.version)
-                    put("format", m.format)
-                    put("createdAt", m.createdAt)
-                }
-                array.put(obj)
-            }
-            context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
-                .edit()
-                .putString("saved_models_list_json", array.toString())
-                .apply()
+            writeModelsPref(context, list)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -592,24 +622,7 @@ object SpineModelLoader {
         if (item != null) {
             File(item.folderPath).deleteRecursively()
             list.removeAll { it.id == modelId }
-
-            val array = JSONArray()
-            list.forEach { m ->
-                val obj = JSONObject().apply {
-                    put("id", m.id)
-                    put("name", m.name)
-                    put("folderPath", m.folderPath)
-                    put("animations", JSONArray(m.animations))
-                    put("skins", JSONArray(m.skins))
-                    put("version", m.version)
-                    put("format", m.format)
-                    put("createdAt", m.createdAt)
-                }
-                array.put(obj)
-            }
-
-            val prefs = context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
-            prefs.edit().putString("saved_models_list_json", array.toString()).apply()
+            writeModelsPref(context, list)
 
             if (getActiveModelId(context) == modelId) {
                 val nextId = list.firstOrNull()?.id

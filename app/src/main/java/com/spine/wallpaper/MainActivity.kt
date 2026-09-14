@@ -15,15 +15,19 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -38,8 +42,10 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.spine.wallpaper.loader.DEFAULT_MODEL_GROUP
 import com.spine.wallpaper.loader.SpineModelItem
 import com.spine.wallpaper.loader.SpineModelLoader
 import com.spine.wallpaper.service.SpineWallpaperService
@@ -306,14 +312,33 @@ fun SpineWallpaperApp(
     var isImporting by remember { mutableStateOf(false) }
     var showVersionInfoDialog by remember { mutableStateOf(false) }
 
+    // ===== 模型库分组 =====
+    /** 当前所有分组（由模型推导，随模型增删自动变化） */
+    var libraryGroups by remember { mutableStateOf<List<String>>(emptyList()) }
+    /** 折叠的分组名集合 */
+    val collapsedGroups = remember { mutableStateMapOf<String, Boolean>() }
+    /** 分组选择弹窗模式：null=关闭，"import"=导入选组，"move"=移动已有模型 */
+    var groupDialogMode by remember { mutableStateOf<String?>(null) }
+    var groupDialogSelection by remember { mutableStateOf(DEFAULT_MODEL_GROUP) }
+    var groupDialogCreating by remember { mutableStateOf(false) }
+    var groupDialogNewName by remember { mutableStateOf("") }
+    /** 待导入的 ZIP（选组确认后才真正解析导入） */
+    var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    /** 待移动分组的模型 id */
+    var pendingMoveModelId by remember { mutableStateOf<String?>(null) }
+
     var isModelsExpanded by remember { mutableStateOf(true) }
-    var isAnimationsExpanded by remember { mutableStateOf(true) }
-    var isSkinsExpanded by remember { mutableStateOf(true) }
     var isSettingsExpanded by remember { mutableStateOf(true) }
+
+    // 底栏内嵌面板：null=收起，"anim"=动作列表，"skin"=部件列表
+    var bottomPanel by remember { mutableStateOf<String?>(null) }
+    /** 部件面板的「多选 / 单选」开关 */
+    var skinMultiSelect by remember { mutableStateOf(prefs.getBoolean("skin_multi_select", false)) }
 
     fun refreshModelsList() {
         val models = SpineModelLoader.getSavedModels(context)
         savedModels = models
+        libraryGroups = SpineModelLoader.getGroups(context)
         val activeId = SpineModelLoader.getActiveModelId(context) ?: models.firstOrNull()?.id
         activeModelId = activeId
 
@@ -363,6 +388,29 @@ fun SpineWallpaperApp(
         refreshModelsList()
     }
 
+    /** 解析 ZIP 并导入到指定分组（分组名不存在即新建）。 */
+    fun doImport(uri: Uri, group: String) {
+        val target = group.trim().ifBlank { DEFAULT_MODEL_GROUP }
+        isImporting = true
+        scope.launch(Dispatchers.IO) {
+            try {
+                val items = SpineModelLoader.importZipToLibrary(context, uri, target)
+                withContext(Dispatchers.Main) {
+                    isImporting = false
+                    prefs.edit().putString("last_import_group", target).apply()
+                    refreshModelsList()
+                    Toast.makeText(context, "🎉 已导入 ${items.size} 个模型到「$target」", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) {
+                    isImporting = false
+                    Toast.makeText(context, "❌ 导入失败: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
     fun selectModel(modelId: String) {
         SpineModelLoader.setActiveModelId(context, modelId)
         refreshModelsList()
@@ -390,7 +438,7 @@ fun SpineWallpaperApp(
 
     fun selectSlot(slot: Int) {
         if (slot == 1 && model2Id == null) {
-            Toast.makeText(context, "请先在模型库中添加一个副模型", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "请先在模型库中将某个模型「设为副模型」", Toast.LENGTH_LONG).show()
             return
         }
         selectedSlot = slot
@@ -417,23 +465,13 @@ fun SpineWallpaperApp(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            isImporting = true
-            scope.launch(Dispatchers.IO) {
-                try {
-                    val items = SpineModelLoader.importZipToLibrary(context, uri)
-                    withContext(Dispatchers.Main) {
-                        isImporting = false
-                        refreshModelsList()
-                        Toast.makeText(context, "🎉 成功导入 ${items.size} 个 Spine 模型！", Toast.LENGTH_SHORT).show()
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    withContext(Dispatchers.Main) {
-                        isImporting = false
-                        Toast.makeText(context, "❌ 导入失败: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
+            // 先让用户选择「导入到哪个分组 / 新建分组」，确认后再解析导入
+            groupDialogSelection = prefs.getString("last_import_group", DEFAULT_MODEL_GROUP)
+                ?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL_GROUP
+            groupDialogCreating = false
+            groupDialogNewName = ""
+            pendingImportUri = uri
+            groupDialogMode = "import"
         }
     }
 
@@ -551,35 +589,36 @@ fun SpineWallpaperApp(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    // ===== 固定的模型库标题栏：不随下方列表滚动，始终可见 =====
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isModelsExpanded = !isModelsExpanded }
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "📁 我的模型库 (${savedModels.size})",
+                            color = palette.accentSoft,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Icon(
+                            if (isModelsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = "折叠/展开",
+                            tint = palette.accentSoft,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        // Section 1: Saved Model List
+                        // Section 1: Saved Model List（按分组展示）
                         item {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { isModelsExpanded = !isModelsExpanded }
-                                    .padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    "📁 我的模型库 (${savedModels.size})",
-                                    color = palette.accentSoft,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Icon(
-                                    if (isModelsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "折叠/展开",
-                                    tint = palette.accentSoft,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-
                             if (isModelsExpanded) {
                                 if (savedModels.isEmpty()) {
                                     Surface(
@@ -595,288 +634,45 @@ fun SpineWallpaperApp(
                                         )
                                     }
                                 } else {
+                                    // 按 group 字段分组；顺序优先跟随 libraryGroups（默认组在最前），
+                                    // 出现库里还没有的新分组时自动追加到末尾。
+                                    val groupedModels = savedModels.groupBy { it.group.ifBlank { DEFAULT_MODEL_GROUP } }
+                                    val orderedGroups = (libraryGroups + groupedModels.keys)
+                                        .distinct()
+                                        .filter { groupedModels.containsKey(it) }
+
                                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        savedModels.forEach { item ->
-                                            val isActive = item.id == activeModelId
-                                            val isSecond = item.id == model2Id
-                                            val verBadgeColor = when (item.version) {
-                                                "3.8" -> Color(0xFF059669) // Emerald
-                                                "4.1" -> Color(0xFF4F46E5) // Indigo
-                                                "3.7" -> Color(0xFFD97706) // Amber
-                                                "3.6" -> Color(0xFFEA580C) // Orange
-                                                "4.0" -> Color(0xFF0891B2) // Cyan
-                                                "4.2" -> Color(0xFF9333EA) // Purple
-                                                else -> Color(0xFF64748B)
-                                            }
+                                        orderedGroups.forEach { g ->
+                                            val groupItems = groupedModels[g].orEmpty()
+                                            val collapsed = collapsedGroups[g] == true
 
-                                            Surface(
-                                                color = if (isActive) palette.cardActive else palette.card,
-                                                shape = RoundedCornerShape(12.dp),
-                                                border = if (isActive) androidx.compose.foundation.BorderStroke(1.dp, palette.accent) else null,
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clickable { selectModel(item.id) }
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.padding(12.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Column(modifier = Modifier.weight(1f)) {
-                                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                                            Text(
-                                                                item.name,
-                                                                color = palette.text,
-                                                                fontWeight = FontWeight.Medium,
-                                                                fontSize = 14.sp,
-                                                                maxLines = 1,
-                                                                overflow = TextOverflow.Ellipsis,
-                                                                modifier = Modifier.weight(1f, fill = false)
-                                                            )
-                                                            Spacer(modifier = Modifier.width(6.dp))
-                                                            // Spine Version Tag
-                                                            Surface(
-                                                                color = verBadgeColor,
-                                                                shape = RoundedCornerShape(4.dp)
-                                                            ) {
-                                                                Text(
-                                                                    "v${item.version}",
-                                                                    color = Color.White,
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Bold,
-                                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                                                )
-                                                            }
-                                                            Spacer(modifier = Modifier.width(4.dp))
-                                                            // Format Tag (.skel / JSON)
-                                                            Surface(
-                                                                color = palette.divider,
-                                                                shape = RoundedCornerShape(4.dp)
-                                                            ) {
-                                                                Text(
-                                                                    item.format,
-                                                                    color = palette.textSecondary,
-                                                                    fontSize = 9.sp,
-                                                                    modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
-                                                                )
-                                                            }
-                                                            if (isActive) {
-                                                                Spacer(modifier = Modifier.width(4.dp))
-                                                                Surface(
-                                                                    color = Color(0xFF10B981),
-                                                                    shape = RoundedCornerShape(4.dp)
-                                                                ) {
-                                                                    Text(
-                                                                        "使用中",
-                                                                        color = Color.White,
-                                                                        fontSize = 9.sp,
-                                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                                                    )
-                                                                }
-                                                            }
-                                                            if (isSecond) {
-                                                                Spacer(modifier = Modifier.width(4.dp))
-                                                                Surface(
-                                                                    color = Color(0xFFF59E0B),
-                                                                    shape = RoundedCornerShape(4.dp)
-                                                                ) {
-                                                                    Text(
-                                                                        "副模型",
-                                                                        color = Color.White,
-                                                                        fontSize = 9.sp,
-                                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                                                    )
-                                                                }
-                                                            }
-                                                        }
-                                                        Spacer(modifier = Modifier.height(4.dp))
-                                                        Text(
-                                                            "动作: ${item.animations.size} 个 | 皮肤: ${item.skins.size} 个",
-                                                            color = palette.textMuted,
-                                                            fontSize = 11.sp
-                                                        )
-                                                    }
-
-                                                    // 添加/移除为副模型
-                                                    IconButton(
-                                                        onClick = { toggleSecondModel(item.id) },
-                                                        modifier = Modifier.size(32.dp)
-                                                    ) {
-                                                        Icon(
-                                                            if (isSecond) Icons.Default.Cancel else Icons.Default.GroupAdd,
-                                                            contentDescription = if (isSecond) "移除副模型" else "设为副模型",
-                                                            tint = if (isSecond) Color(0xFFF59E0B) else palette.accentSoft,
-                                                            modifier = Modifier.size(18.dp)
-                                                        )
-                                                    }
-
-                                                    IconButton(
-                                                        onClick = { deleteModel(item.id) },
-                                                        modifier = Modifier.size(32.dp)
-                                                    ) {
-                                                        Icon(
-                                                            Icons.Default.Delete,
-                                                            contentDescription = "删除",
-                                                            tint = Color(0xFFEF4444),
-                                                            modifier = Modifier.size(18.dp)
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Section 2: Animations List (作用于当前选中槽位)
-                        item {
-                            val slotAnims = if (selectedSlot == 1) animationList2 else animationList
-                            val slotCurAnim = if (selectedSlot == 1) currentAnimation2 else currentAnimation
-                            val slotLabel = if (selectedSlot == 1) "副模型" else "主模型"
-                            val targetModelName = if (selectedSlot == 1)
-                                savedModels.firstOrNull { it.id == model2Id }?.name ?: "未设置"
-                            else
-                                savedModels.firstOrNull { it.id == activeModelId }?.name ?: "未设置"
-
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { isAnimationsExpanded = !isAnimationsExpanded }
-                                    .padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column {
-                                    Text(
-                                        "🎬 动作列表 (${slotAnims.size}) · $slotLabel",
-                                        color = palette.accentSoft,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        targetModelName,
-                                        color = palette.textMuted,
-                                        fontSize = 10.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Icon(
-                                    if (isAnimationsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "折叠/展开",
-                                    tint = palette.accentSoft,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            if (isAnimationsExpanded) {
-                                if (slotAnims.isEmpty()) {
-                                    Text("模型中未检测到动作列表", color = palette.textMuted, fontSize = 12.sp)
-                                } else {
-                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        slotAnims.forEach { anim ->
-                                            val isSelected = anim == slotCurAnim
-                                            Surface(
-                                                color = if (isSelected) palette.cardSelected else palette.card,
-                                                shape = RoundedCornerShape(8.dp),
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clickable {
-                                                        if (selectedSlot == 1) {
-                                                            currentAnimation2 = anim
-                                                        } else {
-                                                            currentAnimation = anim
-                                                        }
-                                                        context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
-                                                            .edit()
-                                                            .putString(SpineModelLoader.SlotPrefs.animKey(selectedSlot), anim)
-                                                            .apply()
-                                                    }
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Icon(
-                                                        if (isSelected) Icons.Default.PlayArrow else Icons.Default.Movie,
-                                                        contentDescription = null,
-                                                        tint = if (isSelected) Color.White else palette.textMuted,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text(
-                                                        anim,
-                                                        color = if (isSelected) Color.White else palette.textSecondary,
-                                                        fontSize = 13.sp,
-                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Section 3: Skins List (作用于当前选中槽位)
-                        if (if (selectedSlot == 1) skinList2.isNotEmpty() else skinList.isNotEmpty()) {
-                            item {
-                                val slotSkins = if (selectedSlot == 1) skinList2 else skinList
-                                val slotCurSkins = if (selectedSlot == 1) currentSkins2 else currentSkins
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { isSkinsExpanded = !isSkinsExpanded }
-                                        .padding(vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        "👗 皮肤部件 (${slotSkins.size})" + if (selectedSlot == 1) " · 副模型" else "",
-                                        color = palette.accentSoft,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Icon(
-                                        if (isSkinsExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                        contentDescription = "折叠/展开",
-                                        tint = palette.accentSoft,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(6.dp))
-
-                                if (isSkinsExpanded) {
-                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        items(slotSkins) { skin ->
-                                            val isSelected = skin in slotCurSkins
-                                            FilterChip(
-                                                selected = isSelected,
-                                                onClick = {
-                                                    val mutable = LinkedHashSet(slotCurSkins)
-                                                    val newSet: Set<String> = if (isSelected) {
-                                                        // 取消选中：若集合变空则保留一个 default / 第一个，避免模型无皮肤
-                                                        mutable.remove(skin)
-                                                        if (mutable.isEmpty()) {
-                                                            val fallback = slotSkins.firstOrNull { it.equals("default", ignoreCase = true) }
-                                                                ?: slotSkins.firstOrNull()
-                                                            if (fallback != null) mutable.add(fallback) else mutable
-                                                        }
-                                                        mutable
-                                                    } else {
-                                                        mutable.add(skin)
-                                                        mutable
-                                                    }
-                                                    if (selectedSlot == 1) currentSkins2 = newSet else currentSkins = newSet
-                                                    saveSelectedSkins(
-                                                        context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE),
-                                                        selectedSlot,
-                                                        newSet
-                                                    )
-                                                },
-                                                label = { Text(skin) }
+                                            GroupHeaderRow(
+                                                name = g,
+                                                count = groupItems.size,
+                                                collapsed = collapsed,
+                                                palette = palette,
+                                                onToggle = { collapsedGroups[g] = !collapsed }
                                             )
+                                            if (collapsed) return@forEach
+
+                                            groupItems.forEach { item ->
+                                                ModelCardRow(
+                                                    item = item,
+                                                    isActive = item.id == activeModelId,
+                                                    isSecond = item.id == model2Id,
+                                                    palette = palette,
+                                                    onSelect = { selectModel(item.id) },
+                                                    onToggleSecond = { toggleSecondModel(item.id) },
+                                                    onDelete = { deleteModel(item.id) },
+                                                    onMoveGroup = {
+                                                        groupDialogSelection = item.group.ifBlank { DEFAULT_MODEL_GROUP }
+                                                        groupDialogCreating = false
+                                                        groupDialogNewName = ""
+                                                        pendingMoveModelId = item.id
+                                                        groupDialogMode = "move"
+                                                    }
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -1230,8 +1026,6 @@ fun SpineWallpaperApp(
                     .background(selectedBgColor)
             ) {
 
-
-
             if (activeModelDir != null) {
                     SpineViewCompose(
                         modelDir = activeModelDir,
@@ -1251,6 +1045,9 @@ fun SpineWallpaperApp(
                         resetTick = resetTick,
                         tapAnimEnabled = tapAnimEnabled,
                         targetFps = targetFps,
+                        // 底栏面板展开时让 SurfaceView 放行触摸，
+                        // 否则它的 OnTouchListener 会吞掉事件、遮罩收不到点击
+                        touchEnabled = bottomPanel == null,
                         onScaleChange = { slot, newScale ->
                             if (slot == 1) scale2Value = newScale else scaleValue = newScale
                         },
@@ -1301,7 +1098,21 @@ fun SpineWallpaperApp(
                     }
                 }
 
-                // Bottom Floating Control Overlay Strip (30% opaque)
+                // 底栏列表展开时的「点击别处收起」遮罩。
+                // 必须放在模型视图**之后**（Compose 的 Box 后写者在上层），
+                // 且放在底栏**之前**，这样它盖住模型区、又不挡底栏的交互。
+                if (bottomPanel != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { bottomPanel = null }
+                    )
+                }
+
+                // ==================== 底栏（照抄 Spine2 实现）====================
                 Surface(
                     color = palette.bottomBarBg,
                     shape = RoundedCornerShape(20.dp),
@@ -1310,7 +1121,264 @@ fun SpineWallpaperApp(
                         .padding(16.dp)
                         .fillMaxWidth(0.92f)
                 ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            // 遮罩已经铺满全屏，这里是它「挖」出来的底栏区域。
+                            // 面板展开时，点底栏的空白处（非按钮）也顺手收起，
+                            // 未展开时不吃点击，保持原行为。
+                            .then(
+                                if (bottomPanel != null) {
+                                    Modifier.clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) { bottomPanel = null }
+                                } else Modifier
+                            )
+                    ) {
+                        val bottomAnims = if (selectedSlot == 1) animationList2 else animationList
+                        val bottomCurAnim = if (selectedSlot == 1) currentAnimation2 else currentAnimation
+                        val bottomSkins = if (selectedSlot == 1) skinList2 else skinList
+                        val bottomSelectedSkins = if (selectedSlot == 1) currentSkins2 else currentSkins
+                        val skinSummary = when {
+                            bottomSelectedSkins.isEmpty() -> "未选"
+                            bottomSelectedSkins.size == 1 -> bottomSelectedSkins.first()
+                            else -> "${bottomSelectedSkins.first()} +${bottomSelectedSkins.size - 1}"
+                        }
+
+                        fun applyAnimation(anim: String) {
+                            if (selectedSlot == 1) {
+                                currentAnimation2 = anim
+                            } else {
+                                currentAnimation = anim
+                            }
+                            prefs.edit().putString(SpineModelLoader.SlotPrefs.animKey(selectedSlot), anim).apply()
+                        }
+
+                        fun applySkins(next: List<String>) {
+                            val asSet: Set<String> = LinkedHashSet(next)
+                            if (selectedSlot == 1) {
+                                currentSkins2 = asSet
+                            } else {
+                                currentSkins = asSet
+                            }
+                            saveSelectedSkins(prefs, selectedSlot, asSet)
+                        }
+
+                        val popupAnim = tween<IntSize>(durationMillis = 150)
+                        AnimatedVisibility(
+                            visible = bottomPanel == "anim",
+                            enter = expandVertically(expandFrom = Alignment.Bottom, animationSpec = popupAnim),
+                            exit = shrinkVertically(shrinkTowards = Alignment.Bottom, animationSpec = popupAnim)
+                        ) {
+                            Column(modifier = Modifier.padding(bottom = 6.dp)) {
+                                if (bottomAnims.isEmpty()) {
+                                    Text("暂无动作", color = palette.textMuted, fontSize = 12.sp)
+                                } else {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 180.dp)
+                                            .verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        bottomAnims.forEach { anim ->
+                                            val isSelected = anim == bottomCurAnim
+                                            Surface(
+                                                color = if (isSelected) palette.cardSelected else palette.card,
+                                                shape = RoundedCornerShape(8.dp),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(32.dp)
+                                                    .clickable {
+                                                        applyAnimation(anim)
+                                                        bottomPanel = null
+                                                    }
+                                            ) {
+                                                Box(contentAlignment = Alignment.CenterStart) {
+                                                    Text(
+                                                        anim,
+                                                        color = if (isSelected) Color.White else palette.textSecondary,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.padding(horizontal = 10.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        AnimatedVisibility(
+                            visible = bottomPanel == "skin",
+                            enter = expandVertically(expandFrom = Alignment.Bottom, animationSpec = popupAnim),
+                            exit = shrinkVertically(shrinkTowards = Alignment.Bottom, animationSpec = popupAnim)
+                        ) {
+                            Column(modifier = Modifier.padding(bottom = 6.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(bottom = 4.dp)
+                                ) {
+                                    val skinModeColor = if (isDarkTheme) Color(0xFFE2E8F0) else Color(0xFF1E293B)
+                                    Checkbox(
+                                        checked = skinMultiSelect,
+                                        onCheckedChange = {
+                                            skinMultiSelect = it
+                                            prefs.edit().putBoolean("skin_multi_select", it).apply()
+                                        },
+                                        colors = CheckboxDefaults.colors(
+                                            checkedColor = skinModeColor,
+                                            uncheckedColor = skinModeColor,
+                                            checkmarkColor = if (isDarkTheme) Color(0xFF0F172A) else Color.White
+                                        ),
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                    Text(
+                                        if (skinMultiSelect) "多选" else "单选",
+                                        color = skinModeColor,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                if (bottomSkins.isEmpty()) {
+                                    Text("暂无部件", color = palette.textMuted, fontSize = 12.sp)
+                                } else {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 180.dp)
+                                            .verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        bottomSkins.forEach { skin ->
+                                            val isSelected = bottomSelectedSkins.contains(skin)
+                                            Surface(
+                                                color = if (isSelected) palette.cardSelected else palette.card,
+                                                shape = RoundedCornerShape(8.dp),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(32.dp)
+                                                    .clickable {
+                                                        if (skinMultiSelect) {
+                                                            applySkins(
+                                                                if (isSelected) {
+                                                                    bottomSelectedSkins.filter { it != skin }
+                                                                } else {
+                                                                    (bottomSelectedSkins + skin).toList()
+                                                                }
+                                                            )
+                                                        } else {
+                                                            applySkins(listOf(skin))
+                                                            bottomPanel = null
+                                                        }
+                                                    }
+                                            ) {
+                                                Box(contentAlignment = Alignment.CenterStart) {
+                                                    Text(
+                                                        skin,
+                                                        color = if (isSelected) Color.White else palette.textSecondary,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.padding(horizontal = 10.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Surface(
+                                color = if (bottomPanel == "anim") palette.cardSelected else palette.chip,
+                                shape = RoundedCornerShape(8.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(32.dp)
+                                    .clickable {
+                                        bottomPanel = if (bottomPanel == "anim") null else "anim"
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "动作",
+                                        color = if (bottomPanel == "anim") Color.White else palette.accentSoft,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        bottomCurAnim ?: "无",
+                                        color = if (bottomPanel == "anim") Color.White else palette.text,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Icon(
+                                        if (bottomPanel == "anim") Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "展开动作列表",
+                                        tint = if (bottomPanel == "anim") Color.White else palette.textMuted,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Surface(
+                                color = if (bottomPanel == "skin") palette.cardSelected else palette.chip,
+                                shape = RoundedCornerShape(8.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(32.dp)
+                                    .clickable {
+                                        bottomPanel = if (bottomPanel == "skin") null else "skin"
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "部件",
+                                        color = if (bottomPanel == "skin") Color.White else palette.accentSoft,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        skinSummary,
+                                        color = if (bottomPanel == "skin") Color.White else palette.text,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Icon(
+                                        if (bottomPanel == "skin") Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "展开部件列表",
+                                        tint = if (bottomPanel == "skin") Color.White else palette.textMuted,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1327,7 +1395,6 @@ fun SpineWallpaperApp(
                                         tint = palette.text
                                     )
                                 }
-                                // 槽位切换：模型1（主）/ 模型2（副）
                                 FilterChip(
                                     selected = selectedSlot == 0,
                                     onClick = { selectSlot(0) },
@@ -1352,8 +1419,6 @@ fun SpineWallpaperApp(
                                     )
                                 )
                             }
-
-                            // 重置按钮：重置当前选中模型的大小和位置
                             TextButton(
                                 onClick = {
                                     if (selectedSlot == 1) scale2Value = 1.0f else scaleValue = 1.0f
@@ -1375,38 +1440,6 @@ fun SpineWallpaperApp(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("重置", color = palette.text, fontSize = 13.sp)
-                            }
-                        }
-
-                        val bottomAnims = if (selectedSlot == 1) animationList2 else animationList
-                        val bottomCurAnim = if (selectedSlot == 1) currentAnimation2 else currentAnimation
-                        if (bottomAnims.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                items(bottomAnims) { anim ->
-                                    val isSelected = anim == bottomCurAnim
-                                    SuggestionChip(
-                                        onClick = {
-                                            if (selectedSlot == 1) {
-                                                currentAnimation2 = anim
-                                            } else {
-                                                currentAnimation = anim
-                                            }
-                                            context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
-                                                .edit()
-                                                .putString(SpineModelLoader.SlotPrefs.animKey(selectedSlot), anim)
-                                                .apply()
-                                        },
-                                        label = { Text(anim, fontSize = 12.sp) },
-                                        colors = SuggestionChipDefaults.suggestionChipColors(
-                                            containerColor = if (isSelected) palette.accent else palette.chip,
-                                            labelColor = if (isSelected) Color.White else palette.text
-                                        )
-                                    )
-                                }
                             }
                         }
                     }
@@ -1507,5 +1540,358 @@ fun SpineWallpaperApp(
                 containerColor = palette.dialogBg
             )
         }
+
+        // ===== 分组选择弹窗：导入选组 / 移动已有模型 =====
+        val dialogMode = groupDialogMode
+        if (dialogMode != null) {
+            GroupPickerDialog(
+                palette = palette,
+                title = if (dialogMode == "import") "导入到分组" else "移动到分组",
+                subtitle = if (dialogMode == "import") "ZIP 中的模型将归入选中的分组" else "选择该模型要移入的分组",
+                groups = libraryGroups,
+                groupCounts = savedModels.groupingBy { it.group.ifBlank { DEFAULT_MODEL_GROUP } }.eachCount(),
+                selectedGroup = groupDialogSelection,
+                creating = groupDialogCreating,
+                newGroupName = groupDialogNewName,
+                confirmLabel = if (dialogMode == "import") "开始导入" else "移入",
+                confirmEnabled = !groupDialogCreating || groupDialogNewName.isNotBlank(),
+                onSelectGroup = {
+                    groupDialogSelection = it
+                    groupDialogCreating = false
+                },
+                onSelectCreate = { groupDialogCreating = true },
+                onNewGroupNameChange = { groupDialogNewName = it },
+                onConfirm = {
+                    val target = if (groupDialogCreating) groupDialogNewName.trim() else groupDialogSelection
+                    if (target.isNotEmpty()) {
+                        if (dialogMode == "import") {
+                            val uri = pendingImportUri
+                            groupDialogMode = null
+                            pendingImportUri = null
+                            if (uri != null) doImport(uri, target)
+                        } else {
+                            val id = pendingMoveModelId
+                            groupDialogMode = null
+                            pendingMoveModelId = null
+                            if (id != null) {
+                                SpineModelLoader.setModelGroup(context, id, target)
+                                refreshModelsList()
+                                Toast.makeText(context, "已移动到「$target」", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                },
+                onDismiss = {
+                    groupDialogMode = null
+                    pendingImportUri = null
+                    pendingMoveModelId = null
+                }
+            )
+        }
     }
+}
+
+// ==================== 模型库分组 UI 组件 ====================
+
+/** 分组标题行（点击折叠/展开该分组）。 */
+@Composable
+private fun GroupHeaderRow(
+    name: String,
+    count: Int,
+    collapsed: Boolean,
+    palette: UiPalette,
+    onToggle: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(palette.card)
+            .clickable { onToggle() }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            if (collapsed) Icons.Default.KeyboardArrowRight else Icons.Default.KeyboardArrowDown,
+            contentDescription = if (collapsed) "展开分组" else "折叠分组",
+            tint = palette.accentSoft,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(2.dp))
+        Icon(
+            Icons.Default.FolderSpecial,
+            contentDescription = null,
+            tint = palette.accentSoft,
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            name,
+            color = palette.text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Text("$count", color = palette.textMuted, fontSize = 11.sp)
+    }
+}
+
+/** 模型库中的单个模型卡片。 */
+@Composable
+private fun ModelCardRow(
+    item: SpineModelItem,
+    isActive: Boolean,
+    isSecond: Boolean,
+    palette: UiPalette,
+    onSelect: () -> Unit,
+    onToggleSecond: () -> Unit,
+    onDelete: () -> Unit,
+    onMoveGroup: () -> Unit
+) {
+    val verBadgeColor = when (item.version) {
+        "3.8" -> Color(0xFF059669)
+        "4.1" -> Color(0xFF4F46E5)
+        "3.7" -> Color(0xFFD97706)
+        "3.6" -> Color(0xFFEA580C)
+        "4.0" -> Color(0xFF0891B2)
+        "4.2" -> Color(0xFF9333EA)
+        else -> Color(0xFF64748B)
+    }
+
+    Surface(
+        color = if (isActive) palette.cardActive else palette.card,
+        shape = RoundedCornerShape(12.dp),
+        border = if (isActive) androidx.compose.foundation.BorderStroke(1.dp, palette.accent) else null,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onSelect() }
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        item.name,
+                        color = palette.text,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(color = verBadgeColor, shape = RoundedCornerShape(4.dp)) {
+                        Text(
+                            "v${item.version}",
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Surface(color = palette.divider, shape = RoundedCornerShape(4.dp)) {
+                        Text(
+                            item.format,
+                            color = palette.textSecondary,
+                            fontSize = 9.sp,
+                            modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                        )
+                    }
+                    if (isActive) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Surface(color = Color(0xFF10B981), shape = RoundedCornerShape(4.dp)) {
+                            Text(
+                                "使用中",
+                                color = Color.White,
+                                fontSize = 9.sp,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                    if (isSecond) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Surface(color = Color(0xFFF59E0B), shape = RoundedCornerShape(4.dp)) {
+                            Text(
+                                "副模型",
+                                color = Color.White,
+                                fontSize = 9.sp,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "动作: ${item.animations.size} 个 | 皮肤: ${item.skins.size} 个",
+                    color = palette.textMuted,
+                    fontSize = 11.sp
+                )
+            }
+
+            IconButton(onClick = onMoveGroup, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Default.DriveFileMove,
+                    contentDescription = "移动到分组",
+                    tint = palette.accentSoft,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            IconButton(onClick = onToggleSecond, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    if (isSecond) Icons.Default.Cancel else Icons.Default.GroupAdd,
+                    contentDescription = if (isSecond) "移除副模型" else "设为副模型",
+                    tint = if (isSecond) Color(0xFFF59E0B) else palette.accentSoft,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "删除",
+                    tint = Color(0xFFEF4444),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+/** 分组选择弹窗：选择已有分组，或切到「新建分组」输入新名字。 */
+@Composable
+private fun GroupPickerDialog(
+    palette: UiPalette,
+    title: String,
+    subtitle: String,
+    groups: List<String>,
+    groupCounts: Map<String, Int>,
+    selectedGroup: String,
+    creating: Boolean,
+    newGroupName: String,
+    confirmLabel: String,
+    confirmEnabled: Boolean,
+    onSelectGroup: (String) -> Unit,
+    onSelectCreate: () -> Unit,
+    onNewGroupNameChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val existingGroups = if (groups.isEmpty()) listOf(DEFAULT_MODEL_GROUP) else groups
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = confirmEnabled) {
+                Text(
+                    confirmLabel,
+                    color = if (confirmEnabled) palette.accentSoft else palette.textMuted,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = palette.textMuted)
+            }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.FolderSpecial,
+                    contentDescription = null,
+                    tint = palette.accentSoft,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(title, fontWeight = FontWeight.Bold, color = palette.text, fontSize = 16.sp)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(subtitle, color = palette.textSecondary, fontSize = 12.sp)
+
+                LazyColumn(
+                    modifier = Modifier.heightIn(max = 190.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(existingGroups) { g ->
+                        val selected = !creating && g == selectedGroup
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (selected) palette.cardActive else palette.card)
+                                .clickable { onSelectGroup(g) }
+                                .padding(horizontal = 10.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                if (selected) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (selected) palette.accent else palette.textMuted,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                g,
+                                color = palette.text,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                "${groupCounts[g] ?: 0} 个",
+                                color = palette.textMuted,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (creating) palette.cardActive else palette.card)
+                        .clickable { onSelectCreate() }
+                        .padding(horizontal = 10.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        if (creating) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                        contentDescription = null,
+                        tint = if (creating) palette.accent else palette.textMuted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        Icons.Default.CreateNewFolder,
+                        contentDescription = null,
+                        tint = palette.accentSoft,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("新建分组", color = palette.text, fontSize = 13.sp)
+                }
+
+                if (creating) {
+                    OutlinedTextField(
+                        value = newGroupName,
+                        onValueChange = onNewGroupNameChange,
+                        singleLine = true,
+                        placeholder = { Text("输入新分组名称", fontSize = 13.sp) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        },
+        containerColor = palette.dialogBg
+    )
 }

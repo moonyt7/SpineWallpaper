@@ -56,6 +56,12 @@ fun SpineViewCompose(
     targetFps: Int = 60,
     onScaleChange: ((slot: Int, scale: Float) -> Unit)? = null,
     onModelLoaded: ((slot: Int, animations: List<String>, skins: List<String>) -> Unit)? = null,
+    /**
+     * 是否把触摸交给 SurfaceView 处理（缩放 / 拖动 / 点击换动作）。
+     * 底栏列表展开时置 false —— SurfaceView 是独立 Surface 层，
+     * 若继续消费事件，Compose 侧的全屏遮罩就收不到点击。
+     */
+    touchEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -92,6 +98,9 @@ fun SpineViewCompose(
 
     // Tap-to-switch-animation toggle (kept in a state so the gesture closure sees fresh value)
     val tapEnabledRef = remember { mutableStateOf(tapAnimEnabled) }
+
+    // 触摸开关：底栏面板展开时为 false，让 SurfaceView 放行事件给上层遮罩
+    val touchEnabledRef = remember { mutableStateOf(touchEnabled) }
 
     fun applyTransform(slot: Int) {
         renderer.updateTransform(currentScale[slot], currentPosX[slot], currentPosY[slot], slot)
@@ -146,6 +155,10 @@ fun SpineViewCompose(
 
     LaunchedEffect(tapAnimEnabled) {
         tapEnabledRef.value = tapAnimEnabled
+    }
+
+    LaunchedEffect(touchEnabled) {
+        touchEnabledRef.value = touchEnabled
     }
 
     LaunchedEffect(targetFps) {
@@ -299,6 +312,10 @@ fun SpineViewCompose(
             factory = {
                 surfaceView.apply {
                     setOnTouchListener { _, event ->
+                        // 面板展开时放行触摸，交给上层的「点击别处收起」遮罩
+                        if (!touchEnabledRef.value) {
+                            return@setOnTouchListener false
+                        }
                         scaleDetector.onTouchEvent(event)
                         gestureDetector.onTouchEvent(event)
                         true
