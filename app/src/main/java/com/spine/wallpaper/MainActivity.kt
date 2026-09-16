@@ -172,6 +172,37 @@ private fun saveSelectedSkins(
         .apply()
 }
 
+/**
+ * 校正「当前动作」。
+ *
+ * 渲染器加载完模型后报告的 [available] 才是这个模型真实可用的动作列表；
+ * 存储的元数据（导入时解析出来的）可能过时或为空，导致底栏显示的当前动作
+ * 既不在列表里、也永远刷不出来。这里按实际列表校正：
+ *   - 列表为空（模型还没加载好）→ 保持原值不动
+ *   - 原值仍是列表成员 → 保持
+ *   - 否则 → 取第一个
+ */
+private fun reconcileAnimation(current: String?, available: List<String>): String? {
+    if (available.isEmpty()) return current
+    if (current != null && available.contains(current)) return current
+    return available.firstOrNull()
+}
+
+/**
+ * 校正「当前部件」，规则同上：
+ *   - 列表为空 → 保持原值
+ *   - 原集合与列表有交集 → 只保留交集（顺序仍按原集合）
+ *   - 无交集 → 退回 `default`（Spine 惯例），没有则取第一个
+ */
+private fun reconcileSkins(current: Set<String>, available: List<String>): Set<String> {
+    if (available.isEmpty()) return current
+    val kept = current.filter { available.contains(it) }
+    if (kept.isNotEmpty()) return LinkedHashSet(kept)
+    val fallback = available.firstOrNull { it.equals("default", ignoreCase = true) }
+        ?: available.first()
+    return LinkedHashSet(listOf(fallback))
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         if (intent == null) {
@@ -1059,6 +1090,54 @@ fun SpineWallpaperApp(
                                 animationList = anims
                                 skinList = skins
                             }
+                            // 渲染器报告的是这个模型「真实可用」的动作/部件。
+                            // 存储的元数据可能过时（导入时没解析全、或模型被重导入过），
+                            // 那样切换模型后底栏显示的动作/部件会停在「无」/「未选」不再刷新。
+                            // 这里按实际列表校正一次，并回写 prefs 与模型元数据。
+                            // 回调来自渲染线程，统一回到主线程改状态。
+                            scope.launch(Dispatchers.Main) {
+                                if (slot == 1) {
+                                    val fixedAnim = reconcileAnimation(currentAnimation2, anims)
+                                    if (fixedAnim != currentAnimation2) {
+                                        currentAnimation2 = fixedAnim
+                                        if (fixedAnim != null) {
+                                            prefs.edit()
+                                                .putString(SpineModelLoader.SlotPrefs.animKey(1), fixedAnim)
+                                                .apply()
+                                        }
+                                    }
+                                    val fixedSkins = reconcileSkins(currentSkins2, skins)
+                                    if (fixedSkins != currentSkins2) {
+                                        currentSkins2 = fixedSkins
+                                        saveSelectedSkins(prefs, 1, fixedSkins)
+                                    }
+                                    model2Id?.let { id ->
+                                        withContext(Dispatchers.IO) {
+                                            SpineModelLoader.updateModelAnimSkins(context, id, anims, skins)
+                                        }
+                                    }
+                                } else {
+                                    val fixedAnim = reconcileAnimation(currentAnimation, anims)
+                                    if (fixedAnim != currentAnimation) {
+                                        currentAnimation = fixedAnim
+                                        if (fixedAnim != null) {
+                                            prefs.edit()
+                                                .putString(SpineModelLoader.SlotPrefs.animKey(0), fixedAnim)
+                                                .apply()
+                                        }
+                                    }
+                                    val fixedSkins = reconcileSkins(currentSkins, skins)
+                                    if (fixedSkins != currentSkins) {
+                                        currentSkins = fixedSkins
+                                        saveSelectedSkins(prefs, 0, fixedSkins)
+                                    }
+                                    activeModelId?.let { id ->
+                                        withContext(Dispatchers.IO) {
+                                            SpineModelLoader.updateModelAnimSkins(context, id, anims, skins)
+                                        }
+                                    }
+                                }
+                            }
                         },
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1145,6 +1224,15 @@ fun SpineWallpaperApp(
                             bottomSelectedSkins.size == 1 -> bottomSelectedSkins.first()
                             else -> "${bottomSelectedSkins.first()} +${bottomSelectedSkins.size - 1}"
                         }
+
+                        // 「动作」「部件」未展开时的底色与描边，取值方式与底部「模型1」未激活
+                        // 芯片完全一致：底色同为 palette.chip，描边直接用 M3 FilterChip 的默认
+                        // 未选中描边（colorScheme.outline，1dp）—— 不再手写 palette.border，
+                        // 否则会因为描边色不同而看起来像另一套控件。
+                        val chipIdleBorder = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = false
+                        )
 
                         fun applyAnimation(anim: String) {
                             if (selectedSlot == 1) {
@@ -1302,7 +1390,11 @@ fun SpineWallpaperApp(
                             Surface(
                                 color = if (bottomPanel == "anim") palette.cardSelected else palette.chip,
                                 shape = RoundedCornerShape(8.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                                border = if (bottomPanel == "anim") {
+                                    androidx.compose.foundation.BorderStroke(1.dp, palette.border)
+                                } else {
+                                    chipIdleBorder
+                                },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(32.dp)
@@ -1341,7 +1433,11 @@ fun SpineWallpaperApp(
                             Surface(
                                 color = if (bottomPanel == "skin") palette.cardSelected else palette.chip,
                                 shape = RoundedCornerShape(8.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, palette.border),
+                                border = if (bottomPanel == "skin") {
+                                    androidx.compose.foundation.BorderStroke(1.dp, palette.border)
+                                } else {
+                                    chipIdleBorder
+                                },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(32.dp)
