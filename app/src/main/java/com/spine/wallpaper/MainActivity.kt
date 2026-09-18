@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -171,6 +172,20 @@ private fun saveSelectedSkins(
         .putString(if (slot == 1) "model2_skin" else "active_skin_name", set.firstOrNull())
         .apply()
 }
+
+/**
+ * 模型列表刷新链路的排查开关。
+ *
+ * 打开后执行 `adb logcat -s SpineDbg` 即可看到：每次刷新模型库用的是哪份数据、
+ * 渲染器实际报告了哪些动作/部件、以及回调是否因为「模型已被切走」而被丢弃。
+ * 这是关键状态行（不是逐帧噪声），排查完改成 false 即可。
+ */
+private const val SPINE_DBG = true
+private const val SPINE_DBG_TAG = "SpineDbg"
+
+/** 供 service 包复用同一个调试开关（`SpineGlRenderer` 等）。 */
+internal const val SPINE_DBG_SHARED = SPINE_DBG
+internal const val SPINE_DBG_TAG_SHARED = SPINE_DBG_TAG
 
 /**
  * 校正「当前动作」。
@@ -412,6 +427,18 @@ fun SpineWallpaperApp(
         if (selectedSlot == 1 && model2Id == null) {
             selectedSlot = 0
             prefs.edit().putInt("selected_slot", 0).apply()
+        }
+
+        // 这里用的是**存储元数据**；渲染器加载完还会用**真实列表**再校正一次。
+        // 两条日志对着看，就能判断「不刷新」是元数据不全还是回调没到。
+        if (SPINE_DBG) {
+            Log.d(
+                SPINE_DBG_TAG,
+                "refresh: active=$activeId anims=${animationList.size} skins=${skinList.size} " +
+                    "curAnim=$currentAnimation curSkins=$currentSkins || " +
+                    "slot1=$model2Id anims2=${animationList2.size} curAnim2=$currentAnimation2 " +
+                    "curSkins2=$currentSkins2"
+            )
         }
     }
 
@@ -1082,59 +1109,74 @@ fun SpineWallpaperApp(
                         onScaleChange = { slot, newScale ->
                             if (slot == 1) scale2Value = newScale else scaleValue = newScale
                         },
-                        onModelLoaded = { slot, anims, skins ->
+                        // 回调已由 SpineViewCompose 从 GL 线程转投到主线程，这里可以安全改状态。
+                        onModelLoaded = loaded@{ slot, dirPath, anims, skins ->
+                            // 丢弃过期回调：模型加载要几百毫秒，期间用户可能已经又切了模型。
+                            // 那条报告对应的是旧目录，拿它校正只会把新模型的动作 / 部件改错。
+                            val expectedDir = if (slot == 1) model2Dir?.absolutePath
+                            else activeModelDir?.absolutePath
+                            if (expectedDir == null || dirPath != expectedDir) {
+                                if (SPINE_DBG) Log.d(
+                                    SPINE_DBG_TAG,
+                                    "loaded DROPPED: slot=$slot dir=$dirPath expected=$expectedDir"
+                                )
+                                return@loaded
+                            }
+                            if (SPINE_DBG) {
+                                Log.d(
+                                    SPINE_DBG_TAG,
+                                    "loaded OK: slot=$slot dir=${dirPath.substringAfterLast('/')} " +
+                                        "anims=${anims.size} skins=${skins.size} " +
+                                        "before=${if (slot == 1) currentAnimation2 else currentAnimation}"
+                                )
+                            }
+
                             if (slot == 1) {
                                 animationList2 = anims
                                 skinList2 = skins
+                                // 渲染器报告的是这个模型「真实可用」的动作/部件；存储的元数据
+                                // 可能过时（导入时没解析全、或模型被重导入过），那样切换模型后
+                                // 底栏显示的动作 / 部件会停在「无」/「未选」不再刷新。
+                                // 这里按实际列表校正一次，并回写 prefs 与模型元数据。
+                                val fixedAnim = reconcileAnimation(currentAnimation2, anims)
+                                if (fixedAnim != currentAnimation2) {
+                                    currentAnimation2 = fixedAnim
+                                    if (fixedAnim != null) {
+                                        prefs.edit()
+                                            .putString(SpineModelLoader.SlotPrefs.animKey(1), fixedAnim)
+                                            .apply()
+                                    }
+                                }
+                                val fixedSkins = reconcileSkins(currentSkins2, skins)
+                                if (fixedSkins != currentSkins2) {
+                                    currentSkins2 = fixedSkins
+                                    saveSelectedSkins(prefs, 1, fixedSkins)
+                                }
+                                model2Id?.let { id ->
+                                    scope.launch(Dispatchers.IO) {
+                                        SpineModelLoader.updateModelAnimSkins(context, id, anims, skins)
+                                    }
+                                }
                             } else {
                                 animationList = anims
                                 skinList = skins
-                            }
-                            // 渲染器报告的是这个模型「真实可用」的动作/部件。
-                            // 存储的元数据可能过时（导入时没解析全、或模型被重导入过），
-                            // 那样切换模型后底栏显示的动作/部件会停在「无」/「未选」不再刷新。
-                            // 这里按实际列表校正一次，并回写 prefs 与模型元数据。
-                            // 回调来自渲染线程，统一回到主线程改状态。
-                            scope.launch(Dispatchers.Main) {
-                                if (slot == 1) {
-                                    val fixedAnim = reconcileAnimation(currentAnimation2, anims)
-                                    if (fixedAnim != currentAnimation2) {
-                                        currentAnimation2 = fixedAnim
-                                        if (fixedAnim != null) {
-                                            prefs.edit()
-                                                .putString(SpineModelLoader.SlotPrefs.animKey(1), fixedAnim)
-                                                .apply()
-                                        }
+                                val fixedAnim = reconcileAnimation(currentAnimation, anims)
+                                if (fixedAnim != currentAnimation) {
+                                    currentAnimation = fixedAnim
+                                    if (fixedAnim != null) {
+                                        prefs.edit()
+                                            .putString(SpineModelLoader.SlotPrefs.animKey(0), fixedAnim)
+                                            .apply()
                                     }
-                                    val fixedSkins = reconcileSkins(currentSkins2, skins)
-                                    if (fixedSkins != currentSkins2) {
-                                        currentSkins2 = fixedSkins
-                                        saveSelectedSkins(prefs, 1, fixedSkins)
-                                    }
-                                    model2Id?.let { id ->
-                                        withContext(Dispatchers.IO) {
-                                            SpineModelLoader.updateModelAnimSkins(context, id, anims, skins)
-                                        }
-                                    }
-                                } else {
-                                    val fixedAnim = reconcileAnimation(currentAnimation, anims)
-                                    if (fixedAnim != currentAnimation) {
-                                        currentAnimation = fixedAnim
-                                        if (fixedAnim != null) {
-                                            prefs.edit()
-                                                .putString(SpineModelLoader.SlotPrefs.animKey(0), fixedAnim)
-                                                .apply()
-                                        }
-                                    }
-                                    val fixedSkins = reconcileSkins(currentSkins, skins)
-                                    if (fixedSkins != currentSkins) {
-                                        currentSkins = fixedSkins
-                                        saveSelectedSkins(prefs, 0, fixedSkins)
-                                    }
-                                    activeModelId?.let { id ->
-                                        withContext(Dispatchers.IO) {
-                                            SpineModelLoader.updateModelAnimSkins(context, id, anims, skins)
-                                        }
+                                }
+                                val fixedSkins = reconcileSkins(currentSkins, skins)
+                                if (fixedSkins != currentSkins) {
+                                    currentSkins = fixedSkins
+                                    saveSelectedSkins(prefs, 0, fixedSkins)
+                                }
+                                activeModelId?.let { id ->
+                                    scope.launch(Dispatchers.IO) {
+                                        SpineModelLoader.updateModelAnimSkins(context, id, anims, skins)
                                     }
                                 }
                             }
@@ -1216,11 +1258,22 @@ fun SpineWallpaperApp(
                             )
                     ) {
                         val bottomAnims = if (selectedSlot == 1) animationList2 else animationList
-                        val bottomCurAnim = if (selectedSlot == 1) currentAnimation2 else currentAnimation
                         val bottomSkins = if (selectedSlot == 1) skinList2 else skinList
-                        val bottomSelectedSkins = if (selectedSlot == 1) currentSkins2 else currentSkins
+                        // 显示值以「该槽位当前可用的实际列表」为准：列表一变（切换模型后渲染器
+                        // 报告新列表、或元数据刷新），显示值立刻跟着变，不必等异步校正写回 state。
+                        // 否则元数据不全的模型会一直停在「无」/「未选」。
+                        val bottomCurAnim = reconcileAnimation(
+                            if (selectedSlot == 1) currentAnimation2 else currentAnimation,
+                            bottomAnims
+                        )
+                        val bottomSelectedSkins = reconcileSkins(
+                            if (selectedSlot == 1) currentSkins2 else currentSkins,
+                            bottomSkins
+                        )
                         val skinSummary = when {
-                            bottomSelectedSkins.isEmpty() -> "未选"
+                            // 同「动作」：列表为空表示渲染器还没报告完，用「…」区分于真正的「未选」
+                            bottomSelectedSkins.isEmpty() ->
+                                if (bottomSkins.isEmpty()) "…" else "未选"
                             bottomSelectedSkins.size == 1 -> bottomSelectedSkins.first()
                             else -> "${bottomSelectedSkins.first()} +${bottomSelectedSkins.size - 1}"
                         }
@@ -1414,7 +1467,9 @@ fun SpineWallpaperApp(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        bottomCurAnim ?: "无",
+                                        // 列表为空 = 渲染器还没报告完（模型正在加载）。
+                                        // 用「…」和真正的「无」区分开，便于判断是加载慢还是没刷新。
+                                        bottomCurAnim ?: if (bottomAnims.isEmpty()) "…" else "无",
                                         color = if (bottomPanel == "anim") Color.White else palette.text,
                                         fontSize = 11.sp,
                                         maxLines = 1,

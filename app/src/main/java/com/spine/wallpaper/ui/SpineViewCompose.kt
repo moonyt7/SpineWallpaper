@@ -1,6 +1,8 @@
 package com.spine.wallpaper.ui
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -55,7 +57,7 @@ fun SpineViewCompose(
     tapAnimEnabled: Boolean = true,
     targetFps: Int = 60,
     onScaleChange: ((slot: Int, scale: Float) -> Unit)? = null,
-    onModelLoaded: ((slot: Int, animations: List<String>, skins: List<String>) -> Unit)? = null,
+    onModelLoaded: ((slot: Int, dirPath: String, animations: List<String>, skins: List<String>) -> Unit)? = null,
     /**
      * 是否把触摸交给 SurfaceView 处理（缩放 / 拖动 / 点击换动作）。
      * 底栏列表展开时置 false —— SurfaceView 是独立 Surface 层，
@@ -143,10 +145,19 @@ fun SpineViewCompose(
         })
     }
 
-    LaunchedEffect(renderer, onModelLoaded) {
-        renderer.onModelLoadedListener = { slot, anims, skins ->
-            onModelLoaded?.invoke(slot, anims, skins)
+    // ⚠️ 渲染器的模型加载回调来自 GL 渲染线程，而且是在持有渲染器锁的情况下发出的。
+    // 上层（MainActivity）会拿这个回调去写 Compose 状态 —— 状态写入必须在主线程完成，
+    // 否则会静默丢失；表现就是「切换模型后底栏的动作 / 部件不刷新」。
+    // 这里统一转投主线程，并用 rememberUpdatedState 保证始终调用最新的 lambda。
+    val onModelLoadedState = rememberUpdatedState(onModelLoaded)
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    DisposableEffect(renderer) {
+        renderer.onModelLoadedListener = { slot, dirPath, anims, skins ->
+            mainHandler.post {
+                onModelLoadedState.value?.invoke(slot, dirPath, anims, skins)
+            }
         }
+        onDispose { renderer.onModelLoadedListener = null }
     }
 
     LaunchedEffect(selectedSlot) {

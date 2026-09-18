@@ -7,6 +7,7 @@ import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
 import android.opengl.GLES20
 import android.os.SystemClock
+import android.util.Log
 import android.view.SurfaceHolder
 import com.badlogic.gdx.backends.android.AndroidGL20
 import com.badlogic.gdx.files.FileHandle
@@ -14,6 +15,8 @@ import com.badlogic.gdx.graphics.OrthographicCamera
 import com.badlogic.gdx.graphics.Texture
 import com.badlogic.gdx.graphics.g2d.PolygonSpriteBatch
 import com.badlogic.gdx.graphics.g2d.TextureAtlas
+import com.spine.wallpaper.SPINE_DBG_SHARED
+import com.spine.wallpaper.SPINE_DBG_TAG_SHARED
 import com.spine.wallpaper.loader.SpineModelLoader
 import com.spine.wallpaper.model.Live2DConfig
 import org.json.JSONObject
@@ -48,9 +51,22 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
         var posX = 0.0f
         var posY = 0.0f
         var isPma = true
-        var pendingAnimationName: String? = null
+        /**
+         * 「期望播放的动作」。**不是一次性 pending** —— 模型切换后重新加载时，
+         * 只要新模型含同名动作就继续播它。
+         *
+         * 旧字段名 pendingAnimationName，加载完即置 null。于是「两个模型动作重名」时：
+         * 上层 Compose 的 LaunchedEffect(activeAnimation) 以**动作名**为 key，名字没变就不重跑
+         * → 不会重发 playAnimation → 新模型既没有 pending 指令，就掉回 config.idle_motion
+         * 或 animNames[0]，出现「界面显示的动作 ≠ 实际播放的动作」。
+         */
+        var desiredAnimationName: String? = null
         var pendingSkinName: String? = null
-        /** 已选皮肤（含基底），用于多选叠加 */
+        /**
+         * 已选皮肤（含基底），用于多选叠加。
+         * 它同时就是「期望皮肤」，跨模型切换保留；加载时与新模型皮肤列表做交集后重建，
+         * 避免重名皮肤场景下新模型掉回 default。
+         */
         val selectedSkins: LinkedHashSet<String> = LinkedHashSet()
         /** 模型未就绪时排队等待执行的 addSkin 列表（已 selectedSkins 之外的增量） */
         val pendingAddSkins: MutableList<String> = mutableListOf()
@@ -68,8 +84,10 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
             }
             instance = null
             atlas = null
-            selectedSkins.clear()
-            pendingAddSkins.clear()
+            // 注意：**不**清空 selectedSkins / desiredAnimationName / pendingAddSkins ——
+            // 它们是「上层期望状态」而不是槽位资源。加载函数会在加载完成后按新模型
+            // 重建 selectedSkins；这里清掉的话，模型被移除再加回来时选择就丢了，
+            // 上层又因为值没变化不会重发，于是显示与实际播放再次不一致。
         }
     }
 
@@ -101,8 +119,18 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
     private var eglConfig: EGLConfig? = null
 
-    /** slot index -> (animations, skins) */
-    var onModelLoadedListener: ((slot: Int, animations: List<String>, skins: List<String>) -> Unit)? = null
+    /**
+     * slot index -> (dirPath, animations, skins)
+     *
+     * 注意：这个回调是在 **GL 渲染线程**上、且**持有本对象锁**时发出的。
+     * 监听方必须立刻把数据转投到主线程再改 Compose 状态，
+     * 否则状态写入会丢失（界面表现为「切换模型后列表/当前值不刷新」）。
+     *
+     * `dirPath` 是这次报告对应的模型目录绝对路径 —— 加载期间用户若又切了模型，
+     * 上层可以据此丢弃过期回调，避免用旧模型的列表覆盖新模型的状态。
+     */
+    var onModelLoadedListener:
+        ((slot: Int, dirPath: String, animations: List<String>, skins: List<String>) -> Unit)? = null
 
     private var viewportWidth = 1080
     private var viewportHeight = 1920
@@ -193,10 +221,12 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     fun playAnimation(animName: String, loop: Boolean = true, slot: Int = SLOT_PRIMARY) {
         val s = slotAt(slot) ?: return
         synchronized(this) {
-            val model = s.instance ?: run {
-                s.pendingAnimationName = animName
-                return
-            }
+            // 先无条件记下「期望动作」（跨模型切换保留）：
+            // 模型已就绪就立刻应用；还没就绪则由加载流程在加载完成后补上。
+            // 不能只在 instance == null 时记 —— 切换模型瞬间 instance 仍是旧模型的，
+            // 那条指令会随旧模型一起被释放掉，新模型就只剩默认动作了。
+            s.desiredAnimationName = animName
+            val model = s.instance ?: return
             try {
                 model.setAnimation(0, animName, loop)
             } catch (e: Exception) {
@@ -438,8 +468,10 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                     for (i in 0 until SLOT_COUNT) {
                         val s = slots[i]
                         if (s.isPending) {
-                            loadModelOnGlThread(s, i)
+                            // 先清标志再加载：加载期间若又来了新的 setModelDirectory，
+                            // 它能重新置位，不会被这一帧的收尾无条件抹掉。
                             s.isPending = false
+                            loadModelOnGlThread(s, i)
                         }
                     }
 
@@ -492,6 +524,9 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
     }
 
     private fun loadModelOnGlThread(s: SlotState, slotIndex: Int) {
+        // 记下本次加载对应的目录。加载耗时可能几百毫秒，期间用户可能又切了模型，
+        // 那样本次加载结果就作废了，既不该上报、也不该清掉后来者的 pending 标志。
+        val dirAtStart = s.dir?.absolutePath
         try {
             s.releaseSlot()
 
@@ -562,50 +597,75 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
             val animNames = instance.animationNames
             val skinNames = instance.skinNames
 
-            val idleAnim = config?.idle_motion
-            var animationSet = false
-            if (!idleAnim.isNullOrEmpty() && animNames.contains(idleAnim)) {
+            // ===== 动作：上层指定的（= 界面显示的那个）> config.idle_motion > 第一个 =====
+            // 上层优先是关键。两个模型动作重名时，上层不会重发 playAnimation
+            // （Compose 的 LaunchedEffect 以动作名为 key，名字没变就不重跑），
+            // 只能靠这里兜住，否则新模型会掉回第一个动作，与界面显示不符。
+            // desiredAnimationName 用后**不清空** —— 它就是期望状态，跨模型切换保留。
+            val desiredAnim = s.desiredAnimationName
+            var appliedAnim: String? = null
+            if (!desiredAnim.isNullOrEmpty() && animNames.contains(desiredAnim)) {
                 try {
-                    instance.setAnimation(0, idleAnim, true)
-                    animationSet = true
+                    instance.setAnimation(0, desiredAnim, true)
+                    appliedAnim = desiredAnim
                 } catch (_: Exception) {}
             }
-            if (!animationSet && animNames.isNotEmpty()) {
+            if (appliedAnim == null) {
+                val idleAnim = config?.idle_motion
+                if (!idleAnim.isNullOrEmpty() && animNames.contains(idleAnim)) {
+                    try {
+                        instance.setAnimation(0, idleAnim, true)
+                        appliedAnim = idleAnim
+                    } catch (_: Exception) {}
+                }
+            }
+            if (appliedAnim == null && animNames.isNotEmpty()) {
                 try {
                     instance.setAnimation(0, animNames[0], true)
                 } catch (_: Exception) {}
             }
 
-            val targetSkin = s.pendingSkinName?.takeIf { skinNames.contains(it) }
+            // ===== 部件：期望集合（上层当前显示的）∩ 新模型可用皮肤 =====
+            // selectedSkins 就是上层的期望值，releaseSlot() 刻意没有清它。
+            val wantedSkins = s.selectedSkins.filter { skinNames.contains(it) }
+            val targetSkin = wantedSkins.firstOrNull()
+                ?: s.pendingSkinName?.takeIf { skinNames.contains(it) }
                 ?: skinNames.firstOrNull { it.equals("default", ignoreCase = true) }
                 ?: skinNames.firstOrNull()
+
+            val appliedSkins = LinkedHashSet<String>()
             if (targetSkin != null) {
                 try {
                     instance.setSkin(targetSkin)
+                    appliedSkins.add(targetSkin)
                 } catch (_: Exception) {}
             }
-            // 若 setSkin 由上层（setSelectedSkins）预先设了基底，且 selectedSkins 已有内容，
-            // 需保证 selectedSkins 与 model 实际状态一致。
-            s.selectedSkins.clear()
-            s.selectedSkins.add(targetSkin ?: "")
-            // 应用排队中的叠加皮肤（来自 addSkin 在模型未就绪时累积的请求）
-            if (s.pendingAddSkins.isNotEmpty()) {
-                val pending = s.pendingAddSkins.filter { skinNames.contains(it) }
-                s.pendingAddSkins.clear()
-                for (name in pending) {
-                    try {
-                        instance.addSkin(name)
-                        s.selectedSkins.add(name)
-                    } catch (_: Exception) {}
+            // 期望集合里除基底外的都要叠加；再加上模型未就绪期间排队的 addSkin 请求
+            val overlays = wantedSkins.filter { it != targetSkin } +
+                s.pendingAddSkins.filter { skinNames.contains(it) }
+            for (name in overlays) {
+                if (!appliedSkins.add(name)) continue
+                try {
+                    instance.addSkin(name)
+                } catch (_: Exception) {
+                    appliedSkins.remove(name)
                 }
             }
+            s.pendingAddSkins.clear()
             s.pendingSkinName = null
+            // 与模型实际状态对齐，并作为下一次模型切换的「期望值」继续传递
+            s.selectedSkins.clear()
+            s.selectedSkins.addAll(appliedSkins)
 
-            if (!s.pendingAnimationName.isNullOrEmpty() && animNames.contains(s.pendingAnimationName)) {
-                try {
-                    instance.setAnimation(0, s.pendingAnimationName!!, true)
-                } catch (_: Exception) {}
-                s.pendingAnimationName = null
+            // 一行看清「实际播了什么 / 期望播什么」。切换模型后若 anim 不等于 want，
+            // 说明期望值不在新模型的列表里，属正常回退；若界面显示与 anim 不符才是 bug。
+            if (SPINE_DBG_SHARED) {
+                Log.d(
+                    SPINE_DBG_TAG_SHARED,
+                    "GL load slot=$slotIndex dir=${dirAtStart?.let { File(it).name } ?: "-"} " +
+                        "anim=$appliedAnim (want=${desiredAnim ?: "-"}, avail=${animNames.size}) " +
+                        "skins=$appliedSkins (avail=${skinNames.size})"
+                )
             }
 
             if (batch == null) {
@@ -615,7 +675,13 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
                 camera = OrthographicCamera()
             }
 
-            onModelLoadedListener?.invoke(slotIndex, animNames, skinNames)
+            // 只有「本次加载对应的目录仍是当前目录」才上报。加载期间目录被换掉时，
+            // 上报的会是旧模型的动作/部件列表，上层据此校正只会把新模型的状态改错。
+            if (s.dir?.absolutePath == dirAtStart) {
+                onModelLoadedListener?.invoke(
+                    slotIndex, dirAtStart ?: "", animNames, skinNames
+                )
+            }
 
         } catch (e: Throwable) {
             e.printStackTrace()
