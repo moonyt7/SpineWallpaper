@@ -17,6 +17,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -41,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
@@ -182,6 +184,9 @@ private fun saveSelectedSkins(
  */
 private const val SPINE_DBG = true
 private const val SPINE_DBG_TAG = "SpineDbg"
+
+/** 危险操作（删除模型 / 删除分组）统一用这个红，避免各处写死不同的值。 */
+private val DANGER_RED = Color(0xFFEF4444)
 
 /** 供 service 包复用同一个调试开关（`SpineGlRenderer` 等）。 */
 internal const val SPINE_DBG_SHARED = SPINE_DBG
@@ -363,7 +368,7 @@ fun SpineWallpaperApp(
     var libraryGroups by remember { mutableStateOf<List<String>>(emptyList()) }
     /** 折叠的分组名集合 */
     val collapsedGroups = remember { mutableStateMapOf<String, Boolean>() }
-    /** 分组选择弹窗模式：null=关闭，"import"=导入选组，"move"=移动已有模型 */
+    /** 分组选择弹窗模式：null=关闭，"import"=导入选组，"move"=移动已有模型，"groupMove"=解散分组后整体移入 */
     var groupDialogMode by remember { mutableStateOf<String?>(null) }
     var groupDialogSelection by remember { mutableStateOf(DEFAULT_MODEL_GROUP) }
     var groupDialogCreating by remember { mutableStateOf(false) }
@@ -372,6 +377,10 @@ fun SpineWallpaperApp(
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
     /** 待移动分组的模型 id */
     var pendingMoveModelId by remember { mutableStateOf<String?>(null) }
+    /** 待删除的分组名（非 null 时显示删除分组确认弹窗） */
+    var groupDeleteTarget by remember { mutableStateOf<String?>(null) }
+    /** 「解散分组」流程的源分组名（groupDialogMode == "groupMove" 时有效） */
+    var pendingGroupMoveFrom by remember { mutableStateOf<String?>(null) }
 
     var isModelsExpanded by remember { mutableStateOf(true) }
     var isSettingsExpanded by remember { mutableStateOf(true) }
@@ -671,12 +680,17 @@ fun SpineWallpaperApp(
                     }
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        // Section 1: Saved Model List（按分组展示）
-                        item {
+                    val sidebarScroll = rememberScrollState()
+
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(sidebarScroll)
+                                .padding(end = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            // Section 1: Saved Model List（按分组展示）
                             if (isModelsExpanded) {
                                 if (savedModels.isEmpty()) {
                                     Surface(
@@ -709,7 +723,8 @@ fun SpineWallpaperApp(
                                                 count = groupItems.size,
                                                 collapsed = collapsed,
                                                 palette = palette,
-                                                onToggle = { collapsedGroups[g] = !collapsed }
+                                                onToggle = { collapsedGroups[g] = !collapsed },
+                                                onDelete = { groupDeleteTarget = g }
                                             )
                                             if (collapsed) return@forEach
 
@@ -735,10 +750,8 @@ fun SpineWallpaperApp(
                                     }
                                 }
                             }
-                        }
 
-                        // Section 4: PMA Switch & Wallpaper Options
-                        item {
+                            // Section 4: PMA Switch & Wallpaper Options
                             Text(
                                 "⚙️ 渲染与壁纸配置",
                                 color = palette.accentSoft,
@@ -934,10 +947,8 @@ fun SpineWallpaperApp(
                                     }
                                 }
                             }
-                        }
 
-                        // Section 5: System Settings (点击切换动画 / 帧率限制 / 主题)
-                        item {
+                            // Section 5: System Settings (点击切换动画 / 帧率限制 / 主题)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1068,6 +1079,17 @@ fun SpineWallpaperApp(
                                 }
                             }
                         }
+
+                        // 内容超出视口时才显示的滚动条（Compose for Android 没有内置滚动条）
+                        SidebarScrollbar(
+                            scrollState = sidebarScroll,
+                            palette = palette,
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .fillMaxHeight()
+                                .width(6.dp)
+                                .padding(vertical = 6.dp)
+                        )
                     }
                 }
             }
@@ -1692,14 +1714,28 @@ fun SpineWallpaperApp(
             )
         }
 
-        // ===== 分组选择弹窗：导入选组 / 移动已有模型 =====
+        // ===== 分组选择弹窗：导入选组 / 移动已有模型 / 解散分组时整体移入 =====
         val dialogMode = groupDialogMode
         if (dialogMode != null) {
+            val moveFrom = pendingGroupMoveFrom
+            // 「解散分组」不能把模型移到它自己，把源分组从候选里剔除
+            val pickerGroups = if (dialogMode == "groupMove" && moveFrom != null) {
+                libraryGroups.filter { it != moveFrom }
+            } else libraryGroups
+
             GroupPickerDialog(
                 palette = palette,
-                title = if (dialogMode == "import") "导入到分组" else "移动到分组",
-                subtitle = if (dialogMode == "import") "ZIP 中的模型将归入选中的分组" else "选择该模型要移入的分组",
-                groups = libraryGroups,
+                title = when (dialogMode) {
+                    "import" -> "导入到分组"
+                    "groupMove" -> "移入其他分组"
+                    else -> "移动到分组"
+                },
+                subtitle = when (dialogMode) {
+                    "import" -> "ZIP 中的模型将归入选中的分组"
+                    "groupMove" -> "「${moveFrom ?: ""}」中的模型将全部移入选中的分组"
+                    else -> "选择该模型要移入的分组"
+                },
+                groups = pickerGroups,
                 groupCounts = savedModels.groupingBy { it.group.ifBlank { DEFAULT_MODEL_GROUP } }.eachCount(),
                 selectedGroup = groupDialogSelection,
                 creating = groupDialogCreating,
@@ -1715,19 +1751,36 @@ fun SpineWallpaperApp(
                 onConfirm = {
                     val target = if (groupDialogCreating) groupDialogNewName.trim() else groupDialogSelection
                     if (target.isNotEmpty()) {
-                        if (dialogMode == "import") {
-                            val uri = pendingImportUri
-                            groupDialogMode = null
-                            pendingImportUri = null
-                            if (uri != null) doImport(uri, target)
-                        } else {
-                            val id = pendingMoveModelId
-                            groupDialogMode = null
-                            pendingMoveModelId = null
-                            if (id != null) {
-                                SpineModelLoader.setModelGroup(context, id, target)
-                                refreshModelsList()
-                                Toast.makeText(context, "已移动到「$target」", Toast.LENGTH_SHORT).show()
+                        when (dialogMode) {
+                            "import" -> {
+                                val uri = pendingImportUri
+                                groupDialogMode = null
+                                pendingImportUri = null
+                                if (uri != null) doImport(uri, target)
+                            }
+                            "groupMove" -> {
+                                val from = pendingGroupMoveFrom
+                                groupDialogMode = null
+                                pendingGroupMoveFrom = null
+                                if (from != null) {
+                                    if (target == from) {
+                                        Toast.makeText(context, "目标分组与当前分组相同", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        val n = SpineModelLoader.moveAllInGroup(context, from, target)
+                                        refreshModelsList()
+                                        Toast.makeText(context, "已把 $n 个模型移入「$target」", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                            else -> {
+                                val id = pendingMoveModelId
+                                groupDialogMode = null
+                                pendingMoveModelId = null
+                                if (id != null) {
+                                    SpineModelLoader.setModelGroup(context, id, target)
+                                    refreshModelsList()
+                                    Toast.makeText(context, "已移动到「$target」", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         }
                     }
@@ -1736,7 +1789,37 @@ fun SpineWallpaperApp(
                     groupDialogMode = null
                     pendingImportUri = null
                     pendingMoveModelId = null
+                    pendingGroupMoveFrom = null
                 }
+            )
+        }
+
+        // ===== 删除分组确认弹窗（二选一：组内模型全部移走 / 全部删除）=====
+        val delGroup = groupDeleteTarget
+        if (delGroup != null) {
+            DeleteGroupDialog(
+                palette = palette,
+                groupName = delGroup,
+                modelCount = savedModels.count {
+                    it.group.ifBlank { DEFAULT_MODEL_GROUP } == delGroup
+                },
+                onMoveAway = {
+                    groupDeleteTarget = null
+                    val others = libraryGroups.filter { it != delGroup }
+                    groupDialogSelection = others.firstOrNull() ?: DEFAULT_MODEL_GROUP
+                    // 没有别的分组可移 → 直接落到「新建分组」输入态
+                    groupDialogCreating = others.isEmpty()
+                    groupDialogNewName = ""
+                    pendingGroupMoveFrom = delGroup
+                    groupDialogMode = "groupMove"
+                },
+                onDeleteAll = {
+                    groupDeleteTarget = null
+                    val n = SpineModelLoader.deleteAllInGroup(context, delGroup)
+                    refreshModelsList()
+                    Toast.makeText(context, "已删除分组「$delGroup」及其 $n 个模型", Toast.LENGTH_SHORT).show()
+                },
+                onDismiss = { groupDeleteTarget = null }
             )
         }
     }
@@ -1744,14 +1827,55 @@ fun SpineWallpaperApp(
 
 // ==================== 模型库分组 UI 组件 ====================
 
-/** 分组标题行（点击折叠/展开该分组）。 */
+/**
+ * 侧边栏滚动条。
+ *
+ * Compose for Android **没有内置滚动条**（`androidx.compose.foundation.VerticalScrollbar`
+ * 是 desktop 专有的），所以这里按 `ScrollState` 的**像素**比例自绘。
+ *
+ * 这正是不用 `LazyColumn` 的原因：整个模型库在 LazyColumn 里只是 **1 个 item**，
+ * 按 item 索引算滑块位置会「一跳一格」，完全不准；`ScrollState` 是像素级的才画得对。
+ *
+ * 内容未超出视口（`maxValue == 0`）时不显示。
+ */
+@Composable
+private fun SidebarScrollbar(
+    scrollState: ScrollState,
+    palette: UiPalette,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val maxScroll = scrollState.maxValue
+        if (maxScroll <= 0) return@BoxWithConstraints
+
+        val viewportPx = with(LocalDensity.current) { maxHeight.toPx() }
+        if (viewportPx <= 0f) return@BoxWithConstraints
+
+        val total = maxScroll + viewportPx
+        val thumbHeight = maxHeight * (viewportPx / total)
+        val thumbOffset = (maxHeight * (scrollState.value / total))
+            .coerceIn(0.dp, (maxHeight - thumbHeight).coerceAtLeast(0.dp))
+
+        Box(
+            modifier = Modifier
+                .offset(y = thumbOffset)
+                .fillMaxWidth()
+                .height(thumbHeight)
+                .clip(RoundedCornerShape(3.dp))
+                .background(palette.textMuted.copy(alpha = 0.6f))
+        )
+    }
+}
+
+/** 分组标题行（点击折叠/展开该分组；右侧垃圾桶删除整个分组）。 */
 @Composable
 private fun GroupHeaderRow(
     name: String,
     count: Int,
     collapsed: Boolean,
     palette: UiPalette,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    onDelete: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -1786,6 +1910,21 @@ private fun GroupHeaderRow(
             modifier = Modifier.weight(1f)
         )
         Text("$count", color = palette.textMuted, fontSize = 11.sp)
+        Spacer(modifier = Modifier.width(4.dp))
+        Box(
+            modifier = Modifier
+                .size(26.dp)
+                .clip(CircleShape)
+                .clickable { onDelete() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Default.Delete,
+                contentDescription = "删除分组「$name」",
+                tint = palette.textMuted,
+                modifier = Modifier.size(15.dp)
+            )
+        }
     }
 }
 
@@ -2041,6 +2180,123 @@ private fun GroupPickerDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+            }
+        },
+        containerColor = palette.dialogBg
+    )
+}
+
+/** 删除分组弹窗里的一个单选项行。 */
+@Composable
+private fun GroupDeleteOptionRow(
+    palette: UiPalette,
+    selected: Boolean,
+    danger: Boolean,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    desc: String,
+    onSelect: () -> Unit
+) {
+    val accent = if (danger) DANGER_RED else palette.accent
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (selected) palette.cardActive else palette.card)
+            .clickable { onSelect() }
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            if (selected) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+            contentDescription = null,
+            tint = if (selected) accent else palette.textMuted,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(16.dp))
+        Spacer(modifier = Modifier.width(6.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = if (danger) DANGER_RED else palette.text, fontSize = 13.sp)
+            Text(desc, color = palette.textMuted, fontSize = 11.sp)
+        }
+    }
+}
+
+/**
+ * 删除分组的确认弹窗。
+ *
+ * 分组只是模型上的一个字段（不单独存储，见 `SpineModelLoader.getGroups`），
+ * 所以「删除分组」必须先决定组内模型怎么办：
+ * 要么**整体移走**（搬空后分组自然消失），要么**连同模型一起删掉**。
+ */
+@Composable
+private fun DeleteGroupDialog(
+    palette: UiPalette,
+    groupName: String,
+    modelCount: Int,
+    onMoveAway: () -> Unit,
+    onDeleteAll: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var moveAway by remember { mutableStateOf(true) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = { if (moveAway) onMoveAway() else onDeleteAll() }) {
+                Text(
+                    if (moveAway) "下一步" else "全部删除",
+                    color = if (moveAway) palette.accentSoft else DANGER_RED,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消", color = palette.textMuted) }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = null,
+                    tint = DANGER_RED,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    "删除分组「$groupName」",
+                    fontWeight = FontWeight.Bold,
+                    color = palette.text,
+                    fontSize = 16.sp
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "分组名只是模型上的一个标签，删掉分组前先决定组内这 $modelCount 个模型怎么处理：",
+                    color = palette.textSecondary,
+                    fontSize = 12.sp
+                )
+                GroupDeleteOptionRow(
+                    palette = palette,
+                    selected = moveAway,
+                    danger = false,
+                    icon = Icons.Default.FolderSpecial,
+                    title = "全部移入其他分组",
+                    desc = "模型文件保留，下一步选择目标分组",
+                    onSelect = { moveAway = true }
+                )
+                GroupDeleteOptionRow(
+                    palette = palette,
+                    selected = !moveAway,
+                    danger = true,
+                    icon = Icons.Default.DeleteForever,
+                    title = "全部删除",
+                    desc = "连同模型文件一起删除，不可恢复",
+                    onSelect = { moveAway = false }
+                )
             }
         },
         containerColor = palette.dialogBg

@@ -17,6 +17,7 @@ import com.badlogic.gdx.graphics.g2d.PolygonSpriteBatch
 import com.badlogic.gdx.graphics.g2d.TextureAtlas
 import com.spine.wallpaper.SPINE_DBG_SHARED
 import com.spine.wallpaper.SPINE_DBG_TAG_SHARED
+import com.spine.wallpaper.loader.AtlasImageResampler
 import com.spine.wallpaper.loader.SpineModelLoader
 import com.spine.wallpaper.model.Live2DConfig
 import org.json.JSONObject
@@ -559,7 +560,13 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
             }
 
             if (atlasFile == null || !atlasFile.exists()) {
+                // 只认原始 atlas：`_` 开头的是我们在旁边生成的中间产物
+                // （`_sanitized_v2_*.atlas` = 清理/尺寸校正后的 atlas，`_fixed_*.png` = 重采样贴图），
+                // 目录遍历顺序不保证，绝不能让它被选中（它的内容随时可能被下次清理覆盖）。
                 atlasFile = allFiles.firstOrNull {
+                    val name = it.name.lowercase()
+                    !it.name.startsWith("_") && (name.endsWith(".atlas") || name.endsWith(".atlas.txt"))
+                } ?: allFiles.firstOrNull {
                     val name = it.name.lowercase()
                     name.endsWith(".atlas") || name.endsWith(".atlas.txt")
                 }
@@ -571,7 +578,21 @@ class SpineGlRenderer(private val surfaceHolder: SurfaceHolder) : SurfaceHolder.
 
             val config = configFile?.let { Live2DConfig.parse(it.readText()) }
 
-            val atlasHandle = com.spine.wallpaper.bridge.AtlasSanitizer.sanitize(atlasFile)
+            val sanitized = com.spine.wallpaper.bridge.AtlasSanitizer.sanitizeEx(
+                atlasFile, AtlasImageResampler
+            )
+            val atlasHandle = sanitized.handle
+            // 让「修复链路走到哪一步」在日志里可见：cache-hit = 直接复用了上次的中间产物
+            // （没重解析、没重写盘）；resolved = 这次重新解析了源 atlas，
+            // 此时 file 以 `_` 开头就说明刚生成了中间产物。
+            if (SPINE_DBG_SHARED) {
+                Log.d(
+                    SPINE_DBG_TAG_SHARED,
+                    "GL atlas slot=$slotIndex " +
+                        (if (sanitized.fromCache) "cache-hit" else "resolved") +
+                        " file=${atlasHandle.name()}"
+                )
+            }
             val loadedAtlas: TextureAtlas = try {
                 TextureAtlas(atlasHandle)
             } catch (e: Throwable) {

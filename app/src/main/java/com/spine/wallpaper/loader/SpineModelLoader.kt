@@ -485,6 +485,70 @@ object SpineModelLoader {
     }
 
     /**
+     * 解散分组：把 [from] 组内的模型**全部**移到 [target] 组（[target] 不存在即新建）。
+     * 返回实际移动的数量。分组是「一个字段」而非独立实体，所以「删除分组」只有
+     * 「把模型搬走」这一种不丢数据的实现 —— 搬空后该分组自然消失。
+     */
+    fun moveAllInGroup(context: Context, from: String, target: String): Int {
+        return try {
+            val src = from.trim().ifBlank { DEFAULT_MODEL_GROUP }
+            val dst = target.trim().ifBlank { DEFAULT_MODEL_GROUP }
+            if (src == dst) return 0
+            val list = getSavedModels(context)
+            var moved = 0
+            val updated = list.map { m ->
+                if (m.group.ifBlank { DEFAULT_MODEL_GROUP } == src) {
+                    moved++
+                    m.copy(group = dst)
+                } else m
+            }
+            if (moved > 0) writeModelsPref(context, updated)
+            moved
+        } catch (e: Exception) {
+            e.printStackTrace()
+            0
+        }
+    }
+
+    /**
+     * 删除 [group] 分组内的**全部**模型（含磁盘目录），返回删除数量。
+     * 与逐个调 [deleteModel] 的区别：只写一次 prefs、只做一次活动/副模型善后，
+     * 避免 N 次全量序列化。
+     */
+    fun deleteAllInGroup(context: Context, group: String): Int {
+        return try {
+            val src = group.trim().ifBlank { DEFAULT_MODEL_GROUP }
+            val list = getSavedModels(context).toMutableList()
+            val victims = list.filter { it.group.ifBlank { DEFAULT_MODEL_GROUP } == src }
+            if (victims.isEmpty()) return 0
+
+            val victimIds = victims.map { it.id }.toHashSet()
+            for (v in victims) {
+                try {
+                    File(v.folderPath).deleteRecursively()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            list.removeAll { it.id in victimIds }
+            writeModelsPref(context, list)
+
+            val activeId = getActiveModelId(context)
+            if (activeId != null && activeId in victimIds) {
+                setActiveModelId(context, list.firstOrNull()?.id)
+            }
+            val secondId = getModelId(context, 1)
+            if (secondId != null && secondId in victimIds) {
+                setModelId(context, 1, null)
+            }
+            victims.size
+        } catch (e: Exception) {
+            e.printStackTrace()
+            0
+        }
+    }
+
+    /**
      * 一次性回收旧版本导入造成的大量重复占用：
      * 早期实现会把整包 ZIP（含多个角色）原样复制到每个模型目录，导致同一套 77 文件 ≈ 91MB
      * 在每个模型目录里重复出现。这里按 model_meta.json 指向的最小依赖集，把每个模型目录中
