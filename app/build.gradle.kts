@@ -108,6 +108,18 @@ tasks.configureEach {
     }
 }
 
+// gdx-backend-android 1.14.2 会传递引入 androidx.core:1.17.0（要求 compileSdk 36 / AGP 8.9.1+），
+// 而本项目是 compileSdk 34 + AGP 8.2.2 —— 把 androidx.core 组锁回与之兼容的 1.13.1。
+// 注意：AndroidX 的 core 与 core-ktx 受「版本对齐」约束，只锁一个会被另一个抬回去，两个都要锁。
+configurations.all {
+    resolutionStrategy {
+        force(
+            "androidx.core:core:1.13.1",
+            "androidx.core:core-ktx:1.13.1"
+        )
+    }
+}
+
 dependencies {
     // Multi-Runtime Isolated Modules (No package collisions!)
     // 各 runtime 模块以 shadowArtifact 形式提供重定位后的官方 spine-libgdx runtime
@@ -118,20 +130,23 @@ dependencies {
     implementation(project(":spine-runtime-v40", configuration = "shadowArtifact"))
     implementation(project(":spine-runtime-v41", configuration = "shadowArtifact"))
     implementation(project(":spine-runtime-v42", configuration = "shadowArtifact"))
+    implementation(project(":spine-runtime-v43", configuration = "shadowArtifact"))
+    // Spine 4.3.39-beta（dev 窗口）：只有它读得了 hero_11000501 / heroCG_11000501 那批中间格式
+    implementation(project(":spine-runtime-v43b", configuration = "shadowArtifact"))
 
-    // libGDX 1.13.1+ for 16 KB page size alignment support on Android 15+
-    implementation("com.badlogicgames.gdx:gdx:1.13.1")
-    implementation("com.badlogicgames.gdx:gdx-backend-android:1.13.1")
+    // libGDX 1.14.2+ for 16 KB page size alignment support on Android 15+
+    implementation("com.badlogicgames.gdx:gdx:1.14.2")
+    implementation("com.badlogicgames.gdx:gdx-backend-android:1.14.2")
 
     // libGDX native platform binaries with 16 KB LOAD segment alignment
-    implementation("com.badlogicgames.gdx:gdx-platform:1.13.1:natives-armeabi-v7a")
-    implementation("com.badlogicgames.gdx:gdx-platform:1.13.1:natives-arm64-v8a")
-    implementation("com.badlogicgames.gdx:gdx-platform:1.13.1:natives-x86")
-    implementation("com.badlogicgames.gdx:gdx-platform:1.13.1:natives-x86_64")
-    natives("com.badlogicgames.gdx:gdx-platform:1.13.1:natives-armeabi-v7a")
-    natives("com.badlogicgames.gdx:gdx-platform:1.13.1:natives-arm64-v8a")
-    natives("com.badlogicgames.gdx:gdx-platform:1.13.1:natives-x86")
-    natives("com.badlogicgames.gdx:gdx-platform:1.13.1:natives-x86_64")
+    implementation("com.badlogicgames.gdx:gdx-platform:1.14.2:natives-armeabi-v7a")
+    implementation("com.badlogicgames.gdx:gdx-platform:1.14.2:natives-arm64-v8a")
+    implementation("com.badlogicgames.gdx:gdx-platform:1.14.2:natives-x86")
+    implementation("com.badlogicgames.gdx:gdx-platform:1.14.2:natives-x86_64")
+    natives("com.badlogicgames.gdx:gdx-platform:1.14.2:natives-armeabi-v7a")
+    natives("com.badlogicgames.gdx:gdx-platform:1.14.2:natives-arm64-v8a")
+    natives("com.badlogicgames.gdx:gdx-platform:1.14.2:natives-x86")
+    natives("com.badlogicgames.gdx:gdx-platform:1.14.2:natives-x86_64")
 
     // Jetpack Compose & UI
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))

@@ -11,7 +11,7 @@ java {
 dependencies {
     compileOnly(project(":spine-core-bridge"))
     implementation("com.esotericsoftware.spine:spine-libgdx:4.2.12")
-    compileOnly("com.badlogicgames.gdx:gdx:1.13.1")
+    compileOnly("com.badlogicgames.gdx:gdx:1.14.2")
 }
 
 tasks.shadowJar {

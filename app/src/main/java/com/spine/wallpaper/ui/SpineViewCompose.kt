@@ -154,6 +154,14 @@ fun SpineViewCompose(
     DisposableEffect(renderer) {
         renderer.onModelLoadedListener = { slot, dirPath, anims, skins ->
             mainHandler.post {
+                // ⭐ 把 GL 线程**真正读出来**的动作/部件名回写 prefs。
+                // 有些版本的 runtime 离屏嗅探不了骨架（4.3 dev 窗口那版就是），
+                // 只有真正加载一次才拿得到名字 —— 这里是唯一可靠的取材点。
+                // 回写成功后 namesRevision 自增，MainActivity 会刷新模型库列表。
+                try {
+                    SpineModelLoader.updateModelAnimSkinsByDir(context, dirPath, anims, skins)
+                } catch (_: Throwable) {
+                }
                 onModelLoadedState.value?.invoke(slot, dirPath, anims, skins)
             }
         }

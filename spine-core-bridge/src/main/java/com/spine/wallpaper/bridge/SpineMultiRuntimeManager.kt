@@ -34,7 +34,7 @@ object SpineMultiRuntimeManager {
     }
 
     private fun registerFallbackFactories() {
-        for (v in listOf(SpineVersion.V36, SpineVersion.V37, SpineVersion.V38, SpineVersion.V40, SpineVersion.V41, SpineVersion.V42)) {
+        for (v in listOf(SpineVersion.V36, SpineVersion.V37, SpineVersion.V38, SpineVersion.V40, SpineVersion.V41, SpineVersion.V42, SpineVersion.V43)) {
             factories[v] = object : IAdapterFactory {
                 override val version: SpineVersion = v
                 override fun createAdapter(skelFile: File, atlas: TextureAtlas, scale: Float, isPma: Boolean): ISpineModelAdapter {
@@ -66,7 +66,14 @@ object SpineMultiRuntimeManager {
     fun peek(version: SpineVersion, skelFile: File): Pair<List<String>, List<String>>? {
         val ordered = linkedSetOf<SpineVersion>()
         ordered.add(version)
-        ordered.addAll(listOf(SpineVersion.V42, SpineVersion.V41, SpineVersion.V40, SpineVersion.V38, SpineVersion.V37, SpineVersion.V36))
+        // V43B（4.3.39-beta dev 窗口）必须排在 V43 之后：先让 4.3.5 试，
+        // 试不动（这批中间格式文件会直接抛异常）再交给 4.3.39-beta 读。
+        ordered.addAll(
+            listOf(
+                SpineVersion.V43, SpineVersion.V43B, SpineVersion.V42, SpineVersion.V41,
+                SpineVersion.V40, SpineVersion.V38, SpineVersion.V37, SpineVersion.V36
+            )
+        )
         for (v in ordered) {
             val peeker = peekers[v] ?: continue
             try {
@@ -99,7 +106,12 @@ object SpineMultiRuntimeManager {
         // 按目标版本优先，未命中或加载失败时按版本从新到旧逐级降级尝试
         val order = linkedSetOf<SpineVersion>()
         order.add(detectedVersion)
-        order.addAll(listOf(SpineVersion.V42, SpineVersion.V41, SpineVersion.V40, SpineVersion.V38, SpineVersion.V37, SpineVersion.V36))
+        order.addAll(
+            listOf(
+                SpineVersion.V43, SpineVersion.V43B, SpineVersion.V42, SpineVersion.V41,
+                SpineVersion.V40, SpineVersion.V38, SpineVersion.V37, SpineVersion.V36
+            )
+        )
 
         val tried = mutableSetOf<SpineVersion>()
         for (v in order) {
@@ -124,6 +136,8 @@ object SpineMultiRuntimeManager {
         version: SpineVersion
     ): ISpineModelAdapter {
         val verStr = when (version) {
+            SpineVersion.V43 -> "4.3"
+            SpineVersion.V43B -> "4.3"
             SpineVersion.V42 -> "4.2"
             SpineVersion.V41 -> "4.1"
             SpineVersion.V40 -> "4.0"

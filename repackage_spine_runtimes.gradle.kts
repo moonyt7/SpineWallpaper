@@ -16,6 +16,7 @@
  *   Spine 4.0.64 -> com.esotericsoftware.spine.v40.* (Module: :spine-runtime-v40)
  *   Spine 4.1.24 -> com.esotericsoftware.spine.v41.* (Module: :spine-runtime-v41)
  *   Spine 4.2.18 -> com.esotericsoftware.spine.v42.* (Module: :spine-runtime-v42)
+ *   Spine 4.3.5  -> com.esotericsoftware.spine.v43.* (Module: :spine-runtime-v43)
  *
  * Usage:
  *   ./gradlew repackageAllSpineRuntimes
@@ -96,10 +97,26 @@ tasks.register("repackageSpine42") {
     }
 }
 
+// 5. Repackage Spine 4.3.5
+tasks.register("repackageSpine43") {
+    group = "spine-isolation"
+    description = "Downloads spine-libgdx:4.3.5 and renames com.esotericsoftware.spine -> com.esotericsoftware.spine.v43"
+    
+    val outputJar = file("spine-runtime-v43/libs/spine-libgdx-4.3.5-repackaged.jar")
+    val rulesFile = file("spine-runtime-v43/jarjar.rules")
+
+    doFirst {
+        rulesFile.parentFile.mkdirs()
+        outputJar.parentFile.mkdirs()
+        rulesFile.writeText("rule com.esotericsoftware.spine.** com.esotericsoftware.spine.v43.@1\n")
+        println("✅ Generated JarJar relocation rule for Spine 4.3: com.esotericsoftware.spine.** -> com.esotericsoftware.spine.v43.**")
+    }
+}
+
 tasks.register("repackageAllSpineRuntimes") {
     group = "spine-isolation"
-    dependsOn("repackageSpine38", "repackageSpine40", "repackageSpine41", "repackageSpine42")
+    dependsOn("repackageSpine38", "repackageSpine40", "repackageSpine41", "repackageSpine42", "repackageSpine43")
     doLast {
-        println("🎉 ALL 4 Spine Runtime Modules (3.8, 4.0, 4.1, 4.2) successfully isolated into unique namespaces!")
+        println("🎉 ALL 5 Spine Runtime Modules (3.8, 4.0, 4.1, 4.2, 4.3) successfully isolated into unique namespaces!")
     }
 }

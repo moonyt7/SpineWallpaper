@@ -56,6 +56,7 @@ import com.spine.wallpaper.ui.ColorPickerDialog
 import com.spine.wallpaper.ui.SpineViewCompose
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -453,6 +454,20 @@ fun SpineWallpaperApp(
 
     LaunchedEffect(Unit) {
         refreshModelsList()
+        // 一次性回填：历史模型在导入时若还没有能读它的 runtime，prefs 里会留下 ["idle"] 占位，
+        // 之后即使补上 runtime 也不会自己变好。这里在后台重扫一遍（闸门在 prefs，只跑一次）。
+        val changed = withContext(Dispatchers.IO) {
+            SpineModelLoader.backfillPeekedAnimSkins(context)
+        }
+        if (changed) refreshModelsList()
+    }
+
+    // 渲染器真正加载模型后会回写真实动作/部件名（见 SpineViewCompose 的 onModelLoaded），
+    // 这里订阅变更并刷新列表 —— 否则用户要退出重进才能看到补全的动作列表。
+    LaunchedEffect(Unit) {
+        SpineModelLoader.namesRevision.drop(1).collect {
+            refreshModelsList()
+        }
     }
 
     /** 解析 ZIP 并导入到指定分组（分组名不存在即新建）。 */
@@ -614,7 +629,7 @@ fun SpineWallpaperApp(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                "全版本多模型支持引擎 (3.6~4.2)",
+                                "全版本多模型支持引擎 (3.6~4.3)",
                                 color = palette.accentSoft,
                                 fontSize = 11.sp
                             )
@@ -699,7 +714,7 @@ fun SpineWallpaperApp(
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
-                                            "暂未保存任何 Spine 模型。\n支持导入 Spine 3.6 / 3.7 / 3.8 / 4.0 / 4.1 / 4.2 的 .zip 压缩包！",
+                                            "暂未保存任何 Spine 模型。\n支持导入 Spine 3.6 / 3.7 / 3.8 / 4.0 / 4.1 / 4.2 / 4.3（含 4.3 dev 窗口中间格式）的 .zip 压缩包！",
                                             color = palette.textMuted,
                                             fontSize = 12.sp,
                                             modifier = Modifier.padding(14.dp)
@@ -1666,10 +1681,17 @@ fun SpineWallpaperApp(
                         )
 
                         val versionDetails = listOf(
+                            Triple("v3.6 / 3.7 (老格式)", "独立模块 :spine-runtime-v36 / v37 隔离运行，兼容老 skins 字典格式", Color(0xFFEA580C)),
                             Triple("v3.8 (主流游戏)", "独立模块 :spine-runtime-v38 隔离运行，支持明日方舟、蔚蓝档案等", Color(0xFF059669)),
                             Triple("v4.0 (官方隔离)", "独立模块 :spine-runtime-v40 隔离运行", Color(0xFF0891B2)),
                             Triple("v4.1 (官方隔离)", "独立模块 :spine-runtime-v41 隔离运行", Color(0xFF4F46E5)),
-                            Triple("v4.2 (官方隔离)", "独立模块 :spine-runtime-v42 隔离运行", Color(0xFF9333EA))
+                            Triple("v4.2 (官方隔离)", "独立模块 :spine-runtime-v42 隔离运行", Color(0xFF9333EA)),
+                            Triple("v4.3 (最新标准)", "独立模块 :spine-runtime-v43 隔离运行，支持 UV 序列与新版附件结构", Color(0xFF0F766E)),
+                            Triple(
+                                "v4.3.39-beta (dev 窗口)",
+                                "独立模块 :spine-runtime-v43b 隔离运行。这批文件的版本串虽写着 4.3，但骨骼尾部与附件读取顺序都是中间格式，已发布的 4.2.12 / 4.3.0~4.3.5 一律读不了（表现为动作只剩 1 个）",
+                                Color(0xFFBE123C)
+                            )
                         )
 
                         versionDetails.forEach { (ver, desc, color) ->
@@ -1940,13 +1962,16 @@ private fun ModelCardRow(
     onDelete: () -> Unit,
     onMoveGroup: () -> Unit
 ) {
-    val verBadgeColor = when (item.version) {
-        "3.8" -> Color(0xFF059669)
-        "4.1" -> Color(0xFF4F46E5)
-        "3.7" -> Color(0xFFD97706)
-        "3.6" -> Color(0xFFEA580C)
-        "4.0" -> Color(0xFF0891B2)
-        "4.2" -> Color(0xFF9333EA)
+    val verBadgeColor = when {
+        // 4.3 有两个互不兼容的窗口，配色区分开，便于一眼判断模型走的是哪条链路
+        item.version.startsWith("4.3.39-beta") -> Color(0xFFBE123C)
+        item.version.startsWith("4.3") -> Color(0xFF0F766E)
+        item.version.startsWith("3.8") -> Color(0xFF059669)
+        item.version.startsWith("4.1") -> Color(0xFF4F46E5)
+        item.version.startsWith("3.7") -> Color(0xFFD97706)
+        item.version.startsWith("3.6") -> Color(0xFFEA580C)
+        item.version.startsWith("4.0") -> Color(0xFF0891B2)
+        item.version.startsWith("4.2") -> Color(0xFF9333EA)
         else -> Color(0xFF64748B)
     }
 

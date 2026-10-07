@@ -15,6 +15,8 @@ enum class SpineVersion(
     V40("4.0", "Spine 4.0 (过渡版本)", ":spine-runtime-v40", "支持曲线插值优化与多边形附件新结构"),
     V41("4.1", "Spine 4.1 (现代官方标准)", ":spine-runtime-v41", "Spine 4.1 序列帧附件与高效图集渲染"),
     V42("4.2", "Spine 4.2 (次时代物理引擎)", ":spine-runtime-v42", "支持实时物理约束、多轨道时间轴与分离缩放"),
+    V43("4.3", "Spine 4.3 (最新标准)", ":spine-runtime-v43", "贴图 UV 移入 Sequence、附件加载 placeholder 化、setupPose 统一接口"),
+    V43B("4.3.39-beta", "Spine 4.3 beta (4.3.39 中间格式)", ":spine-runtime-v43b", "dev 窗口中间格式：附件 loader 无 placeholder、readVertices 为旧版。已发布的 4.2.12 / 4.3.0~4.3.5 都读不了，必须用这一版"),
     UNKNOWN("unknown", "自动探测 / 自适应模式", ":spine-core-bridge", "通过魔数嗅探器自动推断并降级容错");
 
     companion object {
@@ -27,7 +29,16 @@ enum class SpineVersion(
                 clean.startsWith("3.8") -> V38
                 clean.startsWith("4.0") -> V40
                 clean.startsWith("4.1") -> V41
-                clean.startsWith("4.2") || clean.startsWith("4.3") -> V42
+                clean.startsWith("4.2") -> V42
+                // ⚠️ 4.3 有两个互不兼容的「窗口」，靠版本串区分，不能只看 "4.3" 前缀：
+                //   · 已发布档（4.3.0 ~ 4.3.5）           → V43
+                //   · dev 窗口的中间格式（4.3.39-beta 等）  → V43B
+                // 后者骨骼核心顺序是 4.3 的，但 readVertices 为旧版、尾部无 iconSize/iconRotation，
+                // 已发布 runtime 一律读不了。区分规则：带 "-beta" 后缀即 dev 窗口。
+                // 这只是「首选猜测」，真正的判据仍是运行时的逐级降级（试不通自然换下一档），
+                // 所以万一这里猜错也不会误伤 —— 但猜对了能少跑一次注定失败的解析。
+                clean.startsWith("4.3") && clean.contains("beta") -> V43B
+                clean.startsWith("4.3") -> V43
                 else -> UNKNOWN
             }
         }

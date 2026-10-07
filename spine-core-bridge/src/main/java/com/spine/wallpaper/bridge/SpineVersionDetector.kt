@@ -41,6 +41,8 @@ object SpineVersionDetector {
             SpineVersion.V40 -> "4.0"
             SpineVersion.V41 -> "4.1"
             SpineVersion.V42 -> "4.2"
+            SpineVersion.V43 -> "4.3"
+            SpineVersion.V43B -> "4.3.39-beta"
             SpineVersion.UNKNOWN -> "unknown"
         }
     }

@@ -5,6 +5,8 @@ import android.net.Uri
 import com.spine.wallpaper.bridge.SpineVersionDetector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -34,9 +36,17 @@ data class SpineModelItem(
 /**
  * Asynchronous Spine Model Loader with persistent local library storage.
  * Extracts ZIP model files (.skel, .atlas, .png, .config.json) to internal app storage
- * and detects Spine versions (3.6, 3.7, 3.8, 4.0, 4.1, 4.2).
+ * and detects Spine versions (3.6, 3.7, 3.8, 4.0, 4.1, 4.2, 4.3, 4.3.39-beta).
  */
 object SpineModelLoader {
+
+    /**
+     * 模型的动作/部件名被回写时自增，供 UI 订阅后刷新列表。
+     * 见 [updateModelAnimSkinsByDir]：有些版本的 runtime 离屏嗅探不了名字，
+     * 只有真正渲染加载一次才拿得到，拿到后在这里通知界面。
+     */
+    private val _namesRevision = MutableStateFlow(0)
+    val namesRevision: StateFlow<Int> = _namesRevision
 
     init {
         ensureNativesLoaded()
@@ -678,6 +688,108 @@ object SpineModelLoader {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    /**
+     * 用**渲染器真正加载之后**读到的动作/部件名回写 prefs（按模型目录定位）。
+     *
+     * 为什么不靠离屏嗅探：某些版本的 runtime 离屏根本读不了骨架里的附件 ——
+     * 典型是 4.3 dev 窗口（`4.3.39-beta`）那版，它的 `SkeletonBinary` 只保留
+     * `(TextureAtlas)` 构造器，而离屏没有 GL 就构造不出真 `TextureAtlas`
+     * （空纹理占位 `AtlasRegion` 也无法构造，反射替换 loader 在 ART 上又不生效）。
+     * 于是「真正渲染加载一次」成了唯一可靠的取名路径 —— 渲染器本来就已经把
+     * 名字通过 `onModelLoadedListener` 送上来了，这里把它落盘，模型库列表即可自愈。
+     *
+     * @return true 表示确实改动了 prefs（此时 [namesRevision] 会自增，UI 应刷新）。
+     */
+    fun updateModelAnimSkinsByDir(
+        context: Context,
+        dirPath: String,
+        animations: List<String>,
+        skins: List<String>
+    ): Boolean {
+        if (dirPath.isEmpty() || animations.isEmpty() || skins.isEmpty()) return false
+        return try {
+            val list = getSavedModels(context).toMutableList()
+            val target = File(dirPath).absolutePath
+            val idx = list.indexOfFirst { File(it.folderPath).absolutePath == target }
+            if (idx < 0) return false
+            val orig = list[idx]
+            // 兜底引擎只会给占位名；别拿占位覆盖已有的真实值
+            val newAnims =
+                if (animations.size == 1 && animations[0] == "idle" && orig.animations.size > 1) orig.animations else animations
+            val newSkins =
+                if (skins.size == 1 && skins[0] == "default" && orig.skins.size > 1) orig.skins else skins
+            if (newAnims == orig.animations && newSkins == orig.skins) return false
+            list[idx] = orig.copy(animations = newAnims, skins = newSkins)
+            writeModelsPref(context, list)
+            _namesRevision.value += 1
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /**
+     * 启动时的一次性回填：把模型库里**已存在**的二进制模型的「版本串 / 动画名 / 皮肤名」
+     * 重新嗅探一遍并写回 prefs。
+     *
+     * 为什么必须有这一步：
+     * 这三个字段只在**导入那一刻**嗅探并落盘。历史上某次导入时，如果当时还没有能读该文件的
+     * runtime（典型例子：4.3 dev 窗口的中间格式 `4.3.39-beta`），prefs 里就会**永久**留下
+     * `["idle"]` / `["default"]` 占位 —— 之后即使补上了能读它的 runtime，列表也不会自己变好，
+     * 表现为「模型能渲染了，但动作下拉框里只有一个 idle」。
+     * 所以这里用 `peek_schema_version` 做闸门，版本号提升时整体重扫一次，幂等且不拖慢日常启动。
+     */
+    const val PEEK_SCHEMA_VERSION = 2
+
+    /**
+     * @return true 表示确实改动了 prefs（调用方据此决定要不要刷新 UI，避免无谓地打断用户当前选择）。
+     */
+    fun backfillPeekedAnimSkins(context: Context): Boolean {
+        val prefs = context.getSharedPreferences("spine_wallpaper_prefs", Context.MODE_PRIVATE)
+        if (prefs.getInt("peek_schema_version", 0) >= PEEK_SCHEMA_VERSION) return false
+        try {
+            val list = getSavedModels(context).toMutableList()
+            var changed = false
+            for (i in list.indices) {
+                val m = list[i]
+                if (!m.format.equals("SKEL", ignoreCase = true)) continue
+                try {
+                    val dir = File(m.folderPath)
+                    val metaFile = File(dir, "model_meta.json")
+                    if (!metaFile.exists()) continue
+                    val meta = JSONObject(metaFile.readText())
+                    val skelFile = File(dir, meta.optString("skelFile"))
+                    if (!skelFile.exists()) continue
+                    val atlasName = meta.optString("atlasFile")
+                    val atlasFile = if (atlasName.isNotEmpty()) File(dir, atlasName) else null
+
+                    val detected = SpineVersionDetector.detectVersionString(skelFile)
+                    val (a, s) = SpineVersionDetector.peekAnimationsAndSkins(skelFile, atlasFile)
+
+                    // 嗅探失败时 peekAnimationsAndSkins 会回落到占位值，别拿占位覆盖已有的真实值
+                    val ver = if (detected != "unknown") detected else m.version
+                    val anims =
+                        if (a.size == 1 && a[0] == "idle" && m.animations.size > 1) m.animations else a
+                    val skins =
+                        if (s.size == 1 && s[0] == "default" && m.skins.size > 1) m.skins else s
+
+                    if (ver != m.version || anims != m.animations || skins != m.skins) {
+                        list[i] = m.copy(version = ver, animations = anims, skins = skins)
+                        changed = true
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+            if (changed) writeModelsPref(context, list)
+            prefs.edit().putInt("peek_schema_version", PEEK_SCHEMA_VERSION).apply()
+            return changed
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return false
     }
 
     fun deleteModel(context: Context, modelId: String) {
