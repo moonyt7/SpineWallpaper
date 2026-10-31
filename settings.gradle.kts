@@ -25,6 +25,8 @@ dependencyResolutionManagement {
 rootProject.name = "SpineWallpaper"
 include(":app")
 include(":spine-core-bridge")
+include(":spine-runtime-v21")
+include(":spine-runtime-v35")
 include(":spine-runtime-v36")
 include(":spine-runtime-v37")
 include(":spine-runtime-v38")

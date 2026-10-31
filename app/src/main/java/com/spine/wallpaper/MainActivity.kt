@@ -629,7 +629,7 @@ fun SpineWallpaperApp(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                "全版本多模型支持引擎 (3.6~4.3)",
+                                "全版本多模型支持引擎 (2.1~4.3)",
                                 color = palette.accentSoft,
                                 fontSize = 11.sp
                             )
@@ -714,7 +714,7 @@ fun SpineWallpaperApp(
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
-                                            "暂未保存任何 Spine 模型。\n支持导入 Spine 3.6 / 3.7 / 3.8 / 4.0 / 4.1 / 4.2 / 4.3（含 4.3 dev 窗口中间格式）的 .zip 压缩包！",
+                                            "暂未保存任何 Spine 模型。\n支持导入 Spine 2.1 / 3.5 / 3.6 / 3.7 / 3.8 / 4.0 / 4.1 / 4.2 / 4.3（含 4.3 dev 窗口中间格式）的 .zip 压缩包！",
                                             color = palette.textMuted,
                                             fontSize = 12.sp,
                                             modifier = Modifier.padding(14.dp)
@@ -1681,7 +1681,9 @@ fun SpineWallpaperApp(
                         )
 
                         val versionDetails = listOf(
-                            Triple("v3.6 / 3.7 (老格式)", "独立模块 :spine-runtime-v36 / v37 隔离运行，兼容老 skins 字典格式", Color(0xFFEA580C)),
+                            Triple("v2.1 (2014 老格式)", "独立模块 :spine-runtime-v21 隔离运行。2.1 没有 maven 产物，runtime 源码内嵌；Bone 缩放是包私有字段，模型常连版本串都没有", Color(0xFF78350F)),
+                            Triple("v3.5 (老二进制格式)", "独立模块 :spine-runtime-v35 隔离运行。3.6 runtime 读 3.5 的 .skel 会崩（只能读 .json），必须用 3.5 自己的 runtime", Color(0xFFB45309)),
+                            Triple("v3.6 / 3.7 (老格式)", "独立模块 :spine-runtime-v36 / v37 隔离运行，老 skins 字典格式", Color(0xFFEA580C)),
                             Triple("v3.8 (主流游戏)", "独立模块 :spine-runtime-v38 隔离运行，支持明日方舟、蔚蓝档案等", Color(0xFF059669)),
                             Triple("v4.0 (官方隔离)", "独立模块 :spine-runtime-v40 隔离运行", Color(0xFF0891B2)),
                             Triple("v4.1 (官方隔离)", "独立模块 :spine-runtime-v41 隔离运行", Color(0xFF4F46E5)),
@@ -1968,6 +1970,9 @@ private fun ModelCardRow(
         item.version.startsWith("4.3") -> Color(0xFF0F766E)
         item.version.startsWith("3.8") -> Color(0xFF059669)
         item.version.startsWith("4.1") -> Color(0xFF4F46E5)
+        // 2.1 / 3.5 用冷暖两档区分：2.1 最老（棕），3.5 介于其间（琥珀）
+        item.version.startsWith("2.1") -> Color(0xFF78350F)
+        item.version.startsWith("3.5") -> Color(0xFFB45309)
         item.version.startsWith("3.7") -> Color(0xFFD97706)
         item.version.startsWith("3.6") -> Color(0xFFEA580C)
         item.version.startsWith("4.0") -> Color(0xFF0891B2)

@@ -34,7 +34,7 @@ object SpineMultiRuntimeManager {
     }
 
     private fun registerFallbackFactories() {
-        for (v in listOf(SpineVersion.V36, SpineVersion.V37, SpineVersion.V38, SpineVersion.V40, SpineVersion.V41, SpineVersion.V42, SpineVersion.V43)) {
+        for (v in listOf(SpineVersion.V21, SpineVersion.V35, SpineVersion.V36, SpineVersion.V37, SpineVersion.V38, SpineVersion.V40, SpineVersion.V41, SpineVersion.V42, SpineVersion.V43)) {
             factories[v] = object : IAdapterFactory {
                 override val version: SpineVersion = v
                 override fun createAdapter(skelFile: File, atlas: TextureAtlas, scale: Float, isPma: Boolean): ISpineModelAdapter {
@@ -68,10 +68,16 @@ object SpineMultiRuntimeManager {
         ordered.add(version)
         // V43B（4.3.39-beta dev 窗口）必须排在 V43 之后：先让 4.3.5 试，
         // 试不动（这批中间格式文件会直接抛异常）再交给 4.3.39-beta 读。
+        // ⚠️ 顺序 = 降级尝试顺序（新 → 老）。
+        //   · V43B 必须紧跟 V43 之后（同一大版本的两个互不兼容窗口，先让已发布的试）。
+        //   · V35 必须在 V36 之后：能读 3.5 的 .json，但只有 3.5 读得了 3.5 的 .skel。
+        //   · V21 必须最后：2.x 的 .skel/.json 大多连版本串都没有（靠结构启发式或 UNKNOWN 兜底），
+        //     让前 9 个 runtime 先失败一轮再落到它，避免误判把新版模型交给 2014 年的老解析器。
         ordered.addAll(
             listOf(
                 SpineVersion.V43, SpineVersion.V43B, SpineVersion.V42, SpineVersion.V41,
-                SpineVersion.V40, SpineVersion.V38, SpineVersion.V37, SpineVersion.V36
+                SpineVersion.V40, SpineVersion.V38, SpineVersion.V37, SpineVersion.V36,
+                SpineVersion.V35, SpineVersion.V21
             )
         )
         for (v in ordered) {
@@ -109,7 +115,8 @@ object SpineMultiRuntimeManager {
         order.addAll(
             listOf(
                 SpineVersion.V43, SpineVersion.V43B, SpineVersion.V42, SpineVersion.V41,
-                SpineVersion.V40, SpineVersion.V38, SpineVersion.V37, SpineVersion.V36
+                SpineVersion.V40, SpineVersion.V38, SpineVersion.V37, SpineVersion.V36,
+                SpineVersion.V35, SpineVersion.V21
             )
         )
 
@@ -144,6 +151,9 @@ object SpineMultiRuntimeManager {
             SpineVersion.V38 -> "3.8"
             SpineVersion.V37 -> "3.7"
             SpineVersion.V36 -> "3.6"
+            // 3.5 / 2.1 没有对应的内置容错引擎，兜底按最接近的 3.x 处理
+            SpineVersion.V35 -> "3.6"
+            SpineVersion.V21 -> "3.6"
             else -> "3.8"
         }
         val instance = com.spine.wallpaper.bridge.engine.SpineCoreEngine.createModelInstance(

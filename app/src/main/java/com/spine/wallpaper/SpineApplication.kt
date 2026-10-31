@@ -2,6 +2,8 @@ package com.spine.wallpaper
 
 import android.app.Application
 import com.spine.wallpaper.loader.SpineModelLoader
+import com.spine.wallpaper.v21.SpineV21Adapter
+import com.spine.wallpaper.v35.SpineV35Adapter
 import com.spine.wallpaper.v36.SpineV36Adapter
 import com.spine.wallpaper.v37.SpineV37Adapter
 import com.spine.wallpaper.v38.SpineV38Adapter
@@ -17,7 +19,9 @@ class SpineApplication : Application() {
         // 1. Initialize libGDX native platform shared libraries (16KB aligned)
         SpineModelLoader.ensureNativesLoaded()
 
-        // 2. Register all isolated Spine runtime modules (3.6, 3.7, 3.8, 4.0, 4.1, 4.2, 4.3, 4.3.39-beta)
+        // 2. Register all isolated Spine runtime modules (2.1, 3.5, 3.6, 3.7, 3.8, 4.0, 4.1, 4.2, 4.3, 4.3.39-beta)
+        SpineV21Adapter.register()
+        SpineV35Adapter.register()
         SpineV36Adapter.register()
         SpineV37Adapter.register()
         SpineV38Adapter.register()

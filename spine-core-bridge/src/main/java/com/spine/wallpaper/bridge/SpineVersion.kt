@@ -9,7 +9,9 @@ enum class SpineVersion(
     val moduleName: String,
     val description: String
 ) {
-    V36("3.6", "Spine 3.5 / 3.6 (老格式)", ":spine-runtime-v36", "官方 3.6 runtime，兼容读取 3.5 导出的老 skins 字典格式数据"),
+    V21("2.1", "Spine 2.1 (2014 老格式)", ":spine-runtime-v21", "2.1 无 maven 产物，runtime 源码内嵌进模块。Bone 缩放为包私有字段，必须同包访问；附件无 clipping/point，网格分 mesh/skinnedmesh 两种"),
+    V35("3.5", "Spine 3.5 (老二进制格式)", ":spine-runtime-v35", "3.5 的 .skel 与 3.6 布局不同：3.6 runtime 读它会 ArrayIndexOutOfBounds（只有 .json 能读），必须用 3.5 runtime"),
+    V36("3.6", "Spine 3.6 (老格式)", ":spine-runtime-v36", "官方 3.6 runtime，3.6 JSON 仍为老 skins 字典格式"),
     V37("3.7", "Spine 3.7 (老格式)", ":spine-runtime-v37", "官方 3.7 runtime，3.7 JSON 仍为老 skins 字典格式，3.8 runtime 无法解析"),
     V38("3.8", "Spine 3.8 (主流游戏通用)", ":spine-runtime-v38", "明日方舟、蔚蓝档案、碧蓝航线等主流二次元手游标准格式"),
     V40("4.0", "Spine 4.0 (过渡版本)", ":spine-runtime-v40", "支持曲线插值优化与多边形附件新结构"),
@@ -24,7 +26,10 @@ enum class SpineVersion(
             if (versionStr.isNullOrEmpty()) return UNKNOWN
             val clean = versionStr.trim().lowercase()
             return when {
-                clean.startsWith("3.5") || clean.startsWith("3.6") -> V36
+                // 2.x 的导出器大多不带版本串，能读到时才走到这里；识别不到走检测器的结构启发式
+                clean.startsWith("2.0") || clean.startsWith("2.1") -> V21
+                clean.startsWith("3.5") -> V35
+                clean.startsWith("3.6") -> V36
                 clean.startsWith("3.7") -> V37
                 clean.startsWith("3.8") -> V38
                 clean.startsWith("4.0") -> V40

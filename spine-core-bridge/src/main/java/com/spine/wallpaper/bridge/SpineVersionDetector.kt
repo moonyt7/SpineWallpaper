@@ -35,6 +35,8 @@ object SpineVersionDetector {
     fun detectVersionString(file: File): String {
         val ver = detectVersion(file)
         return when (ver) {
+            SpineVersion.V21 -> "2.1"
+            SpineVersion.V35 -> "3.5"
             SpineVersion.V36 -> "3.6"
             SpineVersion.V37 -> "3.7"
             SpineVersion.V38 -> "3.8"
@@ -62,10 +64,20 @@ object SpineVersionDetector {
             val skeletonObj = json.optJSONObject("skeleton")
             val spineVer = skeletonObj?.optString("spine") ?: json.optString("spine", "")
             if (spineVer.isNotEmpty()) {
-                SpineVersion.fromString(spineVer)
-            } else {
-                SpineVersion.UNKNOWN
+                val byVersion = SpineVersion.fromString(spineVer)
+                if (byVersion != SpineVersion.UNKNOWN) return byVersion
+                // 2.1 的导出器会把 "spine" 写成 "Dev" 之类的非版本号字符串，
+                // 这种只能落到下面的结构启发式
             }
+            // ---- 结构启发式：Spine 2.1 的 JSON 没有 "skeleton" 节点 ----
+            // 2.1 导出器直接写 {"bones":[...], "slots":[...], "skins":{...}, "animations":{...}}，
+            // 3.x 起一定先有 "skeleton": {"spine": "x.y.z", "width": ...}。
+            // 所以「无 skeleton 节点 && 有 bones 数组」几乎只可能是 2.x（3.x 缺失 skeleton 节点会导致
+            // width/height 都为 0，且老 skins 字典格式也不一样）。
+            if (skeletonObj == null && json.has("bones")) {
+                return SpineVersion.V21
+            }
+            SpineVersion.UNKNOWN
         } catch (e: Exception) {
             SpineVersion.UNKNOWN
         }
@@ -119,6 +131,9 @@ object SpineVersionDetector {
                     return SpineVersion.fromMajorMinor(3, minor)
                 }
             }
+            // 2.x 的 .skel 大多连版本串都没写（hash/version 都是空串），这里只兜住少数写了 "2.1.x" 的
+            val v2 = Regex("""(?<![0-9])2\.([01])(?:\.[0-9]+)*""").find(header)
+            if (v2 != null) return SpineVersion.V21
         } catch (_: Exception) {}
 
         return SpineVersion.UNKNOWN

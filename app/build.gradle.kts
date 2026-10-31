@@ -124,6 +124,10 @@ dependencies {
     // Multi-Runtime Isolated Modules (No package collisions!)
     // 各 runtime 模块以 shadowArtifact 形式提供重定位后的官方 spine-libgdx runtime
     implementation(project(":spine-core-bridge"))
+    // Spine 2.1（2014 年的老格式）：maven 上没有产物，runtime 源码内嵌在模块里
+    implementation(project(":spine-runtime-v21", configuration = "shadowArtifact"))
+    // Spine 3.5：3.6 runtime 读不了 3.5 的 .skel（只会 ArrayIndexOutOfBounds），必须独立模块
+    implementation(project(":spine-runtime-v35", configuration = "shadowArtifact"))
     implementation(project(":spine-runtime-v36", configuration = "shadowArtifact"))
     implementation(project(":spine-runtime-v37", configuration = "shadowArtifact"))
     implementation(project(":spine-runtime-v38", configuration = "shadowArtifact"))
