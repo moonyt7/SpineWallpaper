@@ -12,7 +12,7 @@ SpineWallpaper is a full-featured Android Live Wallpaper application built with 
    - Dispatches rendering to the corresponding relocated runtime module via `ISpineModelAdapter` bridge
 
 2. **File & ZIP Parsing**:
-   - Accepts compressed ZIP archives containing `.skel`, `.atlas`, `.png`, and `.config.json`
+   - Accepts compressed ZIP archives containing `.skel`, `.atlas`, `.png`
    - Auto texture path matching and pre-multiplied alpha (PMA) detection
    - Reads uncompressed local folders selected via Document File Picker
 
